@@ -18,6 +18,7 @@ type Config struct {
 	VPNServiceName    string
 	AIServiceName     string
 	AllowedBasePath   string
+	UsersDBPath       string
 }
 
 // Load loads settings from .env and environment variables.
@@ -66,6 +67,11 @@ func Load() (*Config, error) {
 		allowedBase = "/"
 	}
 
+	usersDB := strings.TrimSpace(os.Getenv("USERS_DB_PATH"))
+	if usersDB == "" {
+		usersDB = "/opt/superbot/users.json"
+	}
+
 	return &Config{
 		TelegramBotToken:  token,
 		TelegramAdminID:   adminID,
@@ -74,5 +80,6 @@ func Load() (*Config, error) {
 		VPNServiceName:    vpnService,
 		AIServiceName:     aiService,
 		AllowedBasePath:   allowedBase,
+		UsersDBPath:       usersDB,
 	}, nil
 }

@@ -4,29 +4,33 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"vpsbot/internal/antigravity"
+	"vpsbot/internal/auth"
 	"vpsbot/internal/cgroups"
 	"vpsbot/internal/config"
 	"vpsbot/internal/sysinfo"
 )
 
-// Bot manages Telegram updates and command routing.
+// Bot manages Telegram updates, user authorization, and command routing.
 type Bot struct {
 	api    *tgbotapi.BotAPI
 	cfg    *config.Config
+	auth   *auth.Store
 	sys    *sysinfo.SysInfo
 	cg     *cgroups.Manager
 	aiCli  *antigravity.Client
 }
 
-// New creates a new Telegram bot router.
+// New creates a new Telegram bot router with user authentication.
 func New(
 	api *tgbotapi.BotAPI,
 	cfg *config.Config,
+	authStore *auth.Store,
 	sys *sysinfo.SysInfo,
 	cg *cgroups.Manager,
 	aiCli *antigravity.Client,
@@ -34,6 +38,7 @@ func New(
 	return &Bot{
 		api:   api,
 		cfg:   cfg,
+		auth:  authStore,
 		sys:   sys,
 		cg:    cg,
 		aiCli: aiCli,
@@ -46,7 +51,7 @@ func (b *Bot) StartPolling(ctx context.Context) error {
 	u.Timeout = 30
 
 	updates := b.api.GetUpdatesChan(u)
-	log.Printf("[Telegram] Bot @%s successfully started polling. Admin ID: %d", b.api.Self.UserName, b.cfg.TelegramAdminID)
+	log.Printf("[Telegram] Bot @%s started polling. Master Admin ID: %d", b.api.Self.UserName, b.cfg.TelegramAdminID)
 
 	for {
 		select {
@@ -61,13 +66,6 @@ func (b *Bot) StartPolling(ctx context.Context) error {
 				continue
 			}
 
-			// STRICT SECURITY: Drop any message not from authorized admin
-			if update.Message.From.ID != b.cfg.TelegramAdminID {
-				log.Printf("[Security Warning] Unauthorized message dropped from user_id=%d (@%s)",
-					update.Message.From.ID, update.Message.From.UserName)
-				continue
-			}
-
 			go b.handleMessage(update.Message)
 		}
 	}
@@ -75,7 +73,59 @@ func (b *Bot) StartPolling(ctx context.Context) error {
 
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	text := strings.TrimSpace(msg.Text)
-	if text == "" {
+	userID := msg.From.ID
+	userName := msg.From.UserName
+
+	// Check if user is registered/authorized
+	if !b.auth.IsAuthorized(userID) {
+		// Allow /register <invite_code>
+		if strings.HasPrefix(strings.ToLower(text), "/register") {
+			parts := strings.Fields(text)
+			if len(parts) < 2 {
+				b.sendText(msg.Chat.ID, "Укажите инвайт-код: <code>/register ВАШ_КОД</code>")
+				return
+			}
+			code := strings.ToLower(parts[1])
+			if err := b.auth.RedeemInvite(code, userID, userName); err != nil {
+				b.sendText(msg.Chat.ID, fmt.Sprintf("❌ <b>Ошибка регистрации:</b> %s", err.Error()))
+				return
+			}
+
+			b.sendText(msg.Chat.ID, "🎉 <b>Доступ успешно предоставлен!</b>\nДобро пожаловать в SuperBot. Введите /help для просмотра команд.")
+
+			// Notify Master Admin
+			adminNotice := fmt.Sprintf(
+				"✅ <b>Новый пользователь зарегистрирован по инвайт-коду:</b>\n• User: @%s\n• ID: <code>%d</code>",
+				userName, userID,
+			)
+			b.sendText(b.cfg.TelegramAdminID, adminNotice)
+			return
+		}
+
+		// Deny access and display instructions
+		accessDeniedMsg := fmt.Sprintf(
+			"🔒 <b>Доступ ограничен</b>\n\n"+
+				"Бот работает в приватном режиме для авторизованных пользователей сервера.\n"+
+				"Ваш Telegram ID: <code>%d</code>\n\n"+
+				"<b>Как получить доступ:</b>\n"+
+				"1. Передайте ваш ID администратору сервера для добавления.\n"+
+				"2. Или активируйте полученный инвайт-код командой:\n"+
+				"<code>/register ВАШ_КОД</code>",
+			userID,
+		)
+		b.sendText(msg.Chat.ID, accessDeniedMsg)
+
+		// Alert Master Admin about access request
+		fullName := strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
+		adminAlert := fmt.Sprintf(
+			"🔔 <b>Запрос доступа к SuperBot:</b>\n"+
+				"• Пользователь: @%s (%s)\n"+
+				"• ID: <code>%d</code>\n\n"+
+				"Чтобы выдать доступ в 1 клик, отправьте:\n"+
+				"<code>/adduser %d %s</code>",
+			userName, fullName, userID, userID, userName,
+		)
+		b.sendText(b.cfg.TelegramAdminID, adminAlert)
 		return
 	}
 
@@ -90,7 +140,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 		switch cmd {
 		case "/start", "/help":
-			b.replyHelp(msg.Chat.ID)
+			b.replyHelp(msg.Chat.ID, userID)
 
 		case "/stats", "/status":
 			b.replyStats(msg.Chat.ID)
@@ -122,7 +172,73 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			}
 			b.replySendFile(msg.Chat.ID, args[0])
 
+		// === ADMIN-ONLY COMMANDS ===
+		case "/invite":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
+			hours := 24
+			if len(args) > 0 {
+				if h, err := strconv.Atoi(args[0]); err == nil && h > 0 {
+					hours = h
+				}
+			}
+			b.replyCreateInvite(msg.Chat.ID, userID, hours)
+
+		case "/adduser":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
+			if len(args) == 0 {
+				b.sendText(msg.Chat.ID, "Использование: <code>/adduser &lt;id&gt; [username]</code>")
+				return
+			}
+			newID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				b.sendText(msg.Chat.ID, "❌ ID пользователя должен быть числом.")
+				return
+			}
+			uName := ""
+			if len(args) > 1 {
+				uName = strings.TrimPrefix(args[1], "@")
+			}
+			if err := b.auth.AddUser(newID, uName, auth.RoleUser); err != nil {
+				b.sendText(msg.Chat.ID, fmt.Sprintf("❌ Ошибка: %s", err.Error()))
+				return
+			}
+			b.sendText(msg.Chat.ID, fmt.Sprintf("✅ Пользователь <code>%d</code> (@%s) успешно добавлен в белый список!", newID, uName))
+			// Notify added user
+			b.sendText(newID, "🎉 <b>Вам предоставлен доступ к SuperBot!</b> Введите /help для справки.")
+
+		case "/deluser":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
+			if len(args) == 0 {
+				b.sendText(msg.Chat.ID, "Использование: <code>/deluser &lt;id&gt;</code>")
+				return
+			}
+			targetID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				b.sendText(msg.Chat.ID, "❌ ID пользователя должен быть числом.")
+				return
+			}
+			if err := b.auth.RemoveUser(targetID); err != nil {
+				b.sendText(msg.Chat.ID, fmt.Sprintf("❌ Ошибка: %s", err.Error()))
+				return
+			}
+			b.sendText(msg.Chat.ID, fmt.Sprintf("🗑️ Пользователь <code>%d</code> удален из системы.", targetID))
+
+		case "/users":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
+			b.replyListUsers(msg.Chat.ID)
+
 		case "/mode":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
 			modeArg := "auto"
 			if len(args) > 0 {
 				modeArg = strings.ToLower(args[0])
@@ -130,9 +246,15 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			b.replyMode(msg.Chat.ID, cgroups.Mode(modeArg))
 
 		case "/vpn_restart":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
 			b.replyVPNRestart(msg.Chat.ID)
 
 		case "/ai_restart":
+			if !b.checkAdmin(msg.Chat.ID, userID) {
+				return
+			}
 			b.replyAIRestart(msg.Chat.ID)
 
 		default:
@@ -145,28 +267,87 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	b.handleAIQuery(msg.Chat.ID, text)
 }
 
-func (b *Bot) replyHelp(chatID int64) {
-	helpText := `<b>🤖 SuperBot — Панель управления VPS</b>
+func (b *Bot) checkAdmin(chatID, userID int64) bool {
+	if !b.auth.IsAdmin(userID) {
+		b.sendText(chatID, "⛔ Эта команда доступна только администраторам сервера.")
+		return false
+	}
+	return true
+}
 
-<b>⚡ Системные команды (0 токенов, мгновенно):</b>
-• /stats — Метрики CPU, RAM, Swap/ZRAM, Диск, Uptime
-• /top — Топ-5 процессов по потреблению памяти
-• /net — Сетевой трафик и активные интерфейсы
-• /ls &lt;путь&gt; — Просмотр содержимого папки
-• /find &lt;маска&gt; — Быстрый поиск файлов на сервере
-• /send &lt;путь&gt; — Скачать файл с сервера в Telegram
+func (b *Bot) replyHelp(chatID, userID int64) {
+	isAdmin := b.auth.IsAdmin(userID)
 
-<b>⚙️ Управление ресурсами (cgroups v2):</b>
-• /mode vpn — Турбо-приоритет для VPN (x-ui)
-• /mode ai — Турбо-приоритет для Antigravity
-• /mode auto — Сбалансированный режим (50/50)
-• /vpn_restart — Перезапуск VPN-сервиса (x-ui)
-• /ai_restart — Перезапуск AI-сервиса (omniroute)
+	var sb strings.Builder
+	sb.WriteString("<b>🤖 SuperBot — Панель управления VPS</b>\n\n")
+	sb.WriteString("<b>⚡ Системные команды:</b>\n")
+	sb.WriteString("• /stats — Метрики CPU, RAM, ZRAM/Swap, Диск, Uptime\n")
+	sb.WriteString("• /top — Топ-5 процессов по потреблению памяти\n")
+	sb.WriteString("• /net — Сетевой трафик (TX/RX) и интерфейсы\n")
+	sb.WriteString("• /ls &lt;путь&gt; — Просмотр файлов в папке\n")
+	sb.WriteString("• /find &lt;маска&gt; — Быстрый поиск файлов\n")
+	sb.WriteString("• /send &lt;путь&gt; — Скачать файл в Telegram\n\n")
 
-<b>🧠 Интеллектуальный агент:</b>
-<i>Любой обычный текст без слэша (например: «Проверь почту за сегодня») автоматически передается в Antigravity.</i>`
+	if isAdmin {
+		sb.WriteString("<b>👑 Управление пользователями и доступом:</b>\n")
+		sb.WriteString("• /invite [часы] — Создать одноразовый инвайт-код\n")
+		sb.WriteString("• /adduser &lt;id&gt; [username] — Добавить ID в белый список\n")
+		sb.WriteString("• /deluser &lt;id&gt; — Отозвать доступ у пользователя\n")
+		sb.WriteString("• /users — Список всех авторизованных пользователей\n\n")
 
-	b.sendText(chatID, helpText)
+		sb.WriteString("<b>⚙️ Управление ресурсами ядра (cgroups v2):</b>\n")
+		sb.WriteString("• /mode vpn — Турбо-приоритет для VPN (x-ui)\n")
+		sb.WriteString("• /mode ai — Турбо-приоритет для Antigravity\n")
+		sb.WriteString("• /mode auto — Сбалансированный режим (50/50)\n")
+		sb.WriteString("• /vpn_restart — Перезапуск x-ui.service\n")
+		sb.WriteString("• /ai_restart — Перезапуск omniroute.service\n\n")
+	}
+
+	sb.WriteString("<b>🧠 Интеллектуальный агент:</b>\n")
+	sb.WriteString("<i>Отправьте любой обычный текст без слэша (например: «Проверь почту за сегодня»), чтобы передать задачу в Antigravity.</i>")
+
+	b.sendText(chatID, sb.String())
+}
+
+func (b *Bot) replyCreateInvite(chatID, userID int64, hours int) {
+	ttl := time.Duration(hours) * time.Hour
+	code, err := b.auth.GenerateInvite(userID, ttl)
+	if err != nil {
+		b.sendText(chatID, fmt.Sprintf("❌ Ошибка генерации инвайт-кода: %s", err.Error()))
+		return
+	}
+
+	text := fmt.Sprintf(
+		"🎟️ <b>Создан одноразовый инвайт-код:</b>\n\n"+
+			"<code>%s</code>\n\n"+
+			"⏱ <i>Действителен: %d ч.</i>\n\n"+
+			"Передайте этот код новому пользователю. Ему достаточно отправить боту:\n"+
+			"<code>/register %s</code>",
+		code, hours, code,
+	)
+	b.sendText(chatID, text)
+}
+
+func (b *Bot) replyListUsers(chatID int64) {
+	users := b.auth.ListUsers()
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("👥 <b>Авторизованные пользователи (%d):</b>\n\n", len(users)))
+
+	for _, u := range users {
+		roleBadge := "👤 user"
+		if u.Role == auth.RoleAdmin {
+			roleBadge = "👑 admin"
+		}
+		uName := u.Username
+		if uName == "" {
+			uName = "без @username"
+		} else {
+			uName = "@" + uName
+		}
+		sb.WriteString(fmt.Sprintf("• <code>%d</code> | %s (%s)\n", u.ID, uName, roleBadge))
+	}
+
+	b.sendText(chatID, sb.String())
 }
 
 func (b *Bot) replyStats(chatID int64) {
@@ -258,7 +439,6 @@ func (b *Bot) replyAIRestart(chatID int64) {
 }
 
 func (b *Bot) handleAIQuery(chatID int64, prompt string) {
-	// Show typing status
 	_, _ = b.api.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
 
 	waitMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, "🤔 <i>Запрос передан в Antigravity. Думаю...</i>"))
@@ -283,12 +463,10 @@ func (b *Bot) handleAIQuery(chatID int64, prompt string) {
 		return
 	}
 
-	// Update wait message or send new one
 	if waitMsgID > 0 && len(reply) < 4000 {
 		edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, reply)
 		edit.ParseMode = "HTML"
 		if _, err := b.api.Send(edit); err != nil {
-			// If HTML formatting fails, send as plain text
 			edit.ParseMode = ""
 			_, _ = b.api.Send(edit)
 		}
@@ -301,7 +479,6 @@ func (b *Bot) sendText(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	if _, err := b.api.Send(msg); err != nil {
-		// Fallback to plain text if markup parsing fails
 		msg.ParseMode = ""
 		_, _ = b.api.Send(msg)
 	}

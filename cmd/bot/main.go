@@ -10,6 +10,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"vpsbot/internal/antigravity"
+	"vpsbot/internal/auth"
 	"vpsbot/internal/cgroups"
 	"vpsbot/internal/config"
 	"vpsbot/internal/server"
@@ -35,16 +36,23 @@ func main() {
 	}
 	log.Printf("[Init] Connected to Telegram as @%s", botAPI.Self.UserName)
 
-	// 3. Initialize core modules
+	// 3. Initialize Authentication Store (Persistent Whitelist & Invites)
+	authStore, err := auth.NewStore(cfg.UsersDBPath, cfg.TelegramAdminID)
+	if err != nil {
+		log.Fatalf("[FATAL] Failed to initialize auth store: %v", err)
+	}
+	log.Printf("[Init] Auth database loaded from %s (Master Admin: %d)", cfg.UsersDBPath, cfg.TelegramAdminID)
+
+	// 4. Initialize core modules
 	sysMgr := sysinfo.New(cfg.AllowedBasePath)
 	cgMgr := cgroups.New(cfg.VPNServiceName, cfg.AIServiceName)
 	aiClient := antigravity.NewClient(cfg.AntigravityAPIURL)
 
-	// 4. Initialize Local HTTP Server (:43428)
+	// 5. Initialize Local HTTP Server (:43428)
 	localServer := server.New(cfg.LocalAPIPort, cfg.TelegramAdminID, botAPI)
 
-	// 5. Initialize Telegram Router
-	tgRouter := telegram.New(botAPI, cfg, sysMgr, cgMgr, aiClient)
+	// 6. Initialize Telegram Router with Auth Store
+	tgRouter := telegram.New(botAPI, cfg, authStore, sysMgr, cgMgr, aiClient)
 
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,4 +92,3 @@ func main() {
 
 	log.Println("[Exit] SuperBot stopped cleanly.")
 }
-
