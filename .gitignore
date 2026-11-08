@@ -1,0 +1,24 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+superbot
+
+# Secrets & local environments
+.env
+.env.local
+token.json
+credentials.json
+*.session
+*.session-journal
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+*.out

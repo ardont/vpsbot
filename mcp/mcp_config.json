@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "google": {
+      "command": "/opt/superbot/google-mcp-linux-amd64",
+      "args": [
+        "--preset",
+        "everyday"
+      ],
+      "env": {
+        "GOOGLE_CLIENT_ID": "${GOOGLE_CLIENT_ID}",
+        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}",
+        "GOOGLE_REDIRECT_URI": "http://localhost:4100/oauth2callback"
+      }
+    },
+    "telegram-user": {
+      "command": "mcp-telegram",
+      "args": [],
+      "env": {
+        "TG_APP_ID": "${TG_APP_ID}",
+        "TG_APP_HASH": "${TG_APP_HASH}"
+      }
+    },
+    "superbot-bot": {
+      "command": "/usr/local/bin/mcp-telegram-bridge",
+      "args": [],
+      "env": {
+        "LOCAL_API_URL": "http://127.0.0.1:43428/api/send"
+      }
+    }
+  }
+}

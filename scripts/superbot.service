@@ -1,0 +1,24 @@
+[Unit]
+Description=SuperBot - Hybrid Telegram Admin & AI Bridge Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Slice=ai.slice
+WorkingDirectory=/opt/superbot
+ExecStart=/usr/local/bin/superbot
+Restart=always
+RestartSec=5
+MemoryHigh=80M
+MemoryMax=100M
+EnvironmentFile=-/opt/superbot/.env
+
+# Security sandboxing
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
+
