@@ -10,10 +10,11 @@ build:
 	go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME) $(CMD_DIR)
 
 build-linux:
-	@echo "==> Кросс-компиляция статического бинарника для Linux AMD64..."
+	@echo "==> Кросс-компиляция статических бинарников для Linux AMD64..."
 	@mkdir -p $(BUILD_DIR)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME) $(CMD_DIR)
-	@echo "✅ Бинарник собран: $(BUILD_DIR)/$(APP_NAME)"
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BUILD_DIR)/mcp-telegram ./cmd/mcp-telegram
+	@echo "✅ Бинарники собраны: $(BUILD_DIR)/$(APP_NAME), $(BUILD_DIR)/mcp-telegram"
 
 test:
 	go test -v ./...

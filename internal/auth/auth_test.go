@@ -83,3 +83,4 @@ func TestAuthStore_Workflow(t *testing.T) {
 		t.Error("expected error removing main admin, got nil")
 	}
 }
+

@@ -216,3 +216,4 @@ func (s *Store) save() error {
 	}
 	return os.WriteFile(s.filePath, data, 0600)
 }
+

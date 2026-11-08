@@ -61,3 +61,4 @@ systemctl enable agy-pilot.service
 
 echo "✅ Мост agy-pilot настроен и добавлен в автозагрузку!"
 echo "Запуск: systemctl start agy-pilot"
+
