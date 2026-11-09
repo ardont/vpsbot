@@ -151,7 +151,7 @@ def fetch_account_deep(key, acc, limit):
         res["total_count"] = len(all_ids)
 
         unread_set = set(unread_ids)
-        target_ids = unread_ids[-limit:] if unread_ids else all_ids[-limit:]
+        target_ids = all_ids[-limit:]
 
         for num in reversed(target_ids):
             status, data = mail.fetch(num, '(RFC822)')
@@ -259,7 +259,7 @@ def fetch_account_html(key, acc, limit):
 
         lines.append(f"├ <b>Всего писем:</b> <code>{len(all_ids):,}</code> | <b>Непрочитанных:</b> <code>{len(unseen_ids):,}</code>")
 
-        target_ids = unseen_ids[-limit:] if unseen_ids else all_ids[-limit:]
+        target_ids = all_ids[-limit:]
         if not target_ids:
             lines.append("└ 📭 <i>Папка входящих пуста</i>\n")
             mail.logout()
