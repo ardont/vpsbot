@@ -1050,8 +1050,37 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 	}()
 	defer close(stopTyping)
 
+	// Rate-limited real-time progress updates to Telegram
+	var lastEdit time.Time
+	var lastSummary string
+	var editMu sync.Mutex
+
+	onProgress := func(action, summary string) {
+		if waitMsgID <= 0 || summary == "" {
+			return
+		}
+		editMu.Lock()
+		defer editMu.Unlock()
+
+		if summary == lastSummary {
+			return
+		}
+		lastSummary = summary
+
+		// Telegram rate-limiting: at most 1 edit every 1800ms
+		if time.Since(lastEdit) < 1800*time.Millisecond {
+			return
+		}
+		lastEdit = time.Now()
+
+		statusText := fmt.Sprintf("⏳ <b>В процессе:</b>\n└ ⚡ <i>%s...</i>", html.EscapeString(summary))
+		edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, statusText)
+		edit.ParseMode = "HTML"
+		_, _ = b.api.Send(edit)
+	}
+
 	activeConvID := b.getSession(userID)
-	resp, err := b.aiCli.Ask(ctx, prompt, activeConvID, false)
+	resp, err := b.aiCli.AskStream(ctx, prompt, activeConvID, false, onProgress)
 	if err != nil {
 		errMsg := fmt.Sprintf("⚠️ <b>Antigravity Bridge:</b>\n%s", html.EscapeString(err.Error()))
 		if waitMsgID > 0 {

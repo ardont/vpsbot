@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -53,8 +54,10 @@ type queryResponse struct {
 	Error          string   `json:"error,omitempty"`
 }
 
-// Ask sends a user question to Antigravity and returns the response.
-func (c *Client) Ask(ctx context.Context, prompt string, convID string, reset bool) (*Response, error) {
+type ProgressFunc func(action, summary string)
+
+// AskStream sends a prompt and processes live tool progress events before returning the final response.
+func (c *Client) AskStream(ctx context.Context, prompt string, convID string, reset bool, onProgress ProgressFunc) (*Response, error) {
 	reqBody, err := json.Marshal(QueryRequest{
 		Prompt:         prompt,
 		Query:          prompt,
@@ -65,12 +68,13 @@ func (c *Client) Ask(ctx context.Context, prompt string, convID string, reset bo
 		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
 
-	url := c.apiURL + "/api/ask"
+	url := c.apiURL + "/api/ask?stream=true"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/x-ndjson")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -78,12 +82,18 @@ func (c *Client) Ask(ctx context.Context, prompt string, convID string, reset bo
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ошибка Antigravity (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
-	if resp.StatusCode == http.StatusOK {
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "application/x-ndjson") {
+		// Non-streaming fallback
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
 		var qResp queryResponse
 		if err := json.Unmarshal(body, &qResp); err == nil {
 			replyText := qResp.Response
@@ -97,10 +107,60 @@ func (c *Client) Ask(ctx context.Context, prompt string, convID string, reset bo
 				Options:        qResp.Options,
 			}, nil
 		}
-		return &Response{
-			Text: strings.TrimSpace(string(body)),
-		}, nil
+		return &Response{Text: strings.TrimSpace(string(body))}, nil
 	}
 
-	return nil, fmt.Errorf("ошибка Antigravity (HTTP %d): %s", resp.StatusCode, string(body))
+	// Stream NDJSON events
+	var finalResp *Response
+	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 2*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var ev struct {
+			Type           string   `json:"type"`
+			Action         string   `json:"action"`
+			Summary        string   `json:"summary"`
+			Response       string   `json:"response"`
+			Question       string   `json:"question"`
+			Options        []string `json:"options"`
+			ConversationID string   `json:"conversation_id"`
+			Error          string   `json:"error"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+
+		switch ev.Type {
+		case "progress":
+			if onProgress != nil && ev.Summary != "" {
+				onProgress(ev.Action, ev.Summary)
+			}
+		case "done":
+			replyText := ev.Response
+			finalResp = &Response{
+				Text:           replyText,
+				ConversationID: ev.ConversationID,
+				Question:       ev.Question,
+				Options:        ev.Options,
+			}
+		case "error":
+			return nil, fmt.Errorf("%s", ev.Error)
+		}
+	}
+
+	if finalResp != nil {
+		return finalResp, nil
+	}
+	return nil, fmt.Errorf("поток завершился без ответа Antigravity")
+}
+
+// Ask sends a user question to Antigravity without progress streaming.
+func (c *Client) Ask(ctx context.Context, prompt string, convID string, reset bool) (*Response, error) {
+	return c.AskStream(ctx, prompt, convID, reset, nil)
 }

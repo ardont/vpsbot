@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -48,6 +49,23 @@ type ToolCallItem struct {
 	Args json.RawMessage `json:"args"`
 }
 
+type StreamEvent struct {
+	Type           string   `json:"type"` // "start", "progress", "done", "error"
+	ConversationID string   `json:"conversation_id,omitempty"`
+	Action         string   `json:"action,omitempty"`
+	Summary        string   `json:"summary,omitempty"`
+	Response       string   `json:"response,omitempty"`
+	Question       string   `json:"question,omitempty"`
+	Options        []string `json:"options,omitempty"`
+	Error          string   `json:"error,omitempty"`
+}
+
+type ToolEvent struct {
+	StepIndex int
+	Name      string
+	Summary   string
+}
+
 type TranscriptStep struct {
 	StepIndex int            `json:"step_index"`
 	Source    string         `json:"source"`
@@ -79,8 +97,8 @@ func main() {
 	server := &http.Server{
 		Addr:         "127.0.0.1:" + port,
 		Handler:      mux,
-		ReadTimeout:  120 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		ReadTimeout:  300 * time.Second,
+		WriteTimeout: 300 * time.Second,
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -142,7 +160,49 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[agy-pilot] Prompt: %s (session: %s, reset: %v)", truncate(prompt, 50), req.ConversationID, req.ResetSession)
 
-	resp, err := queryAntigravity(r.Context(), prompt, req.ConversationID, req.ResetSession)
+	isStream := r.Header.Get("Accept") == "application/x-ndjson" || r.URL.Query().Get("stream") == "true"
+	if isStream {
+		if flusher, ok := w.(http.Flusher); ok {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+			flusher.Flush()
+
+			enc := json.NewEncoder(w)
+			var encMu sync.Mutex
+			onProgress := func(ev StreamEvent) {
+				encMu.Lock()
+				_ = enc.Encode(ev)
+				flusher.Flush()
+				encMu.Unlock()
+			}
+
+			resp, err := queryAntigravity(r.Context(), prompt, req.ConversationID, req.ResetSession, onProgress)
+			if err != nil {
+				log.Printf("[agy-pilot] Antigravity failed: %v", err)
+				encMu.Lock()
+				_ = enc.Encode(StreamEvent{Type: "error", Error: err.Error()})
+				flusher.Flush()
+				encMu.Unlock()
+				return
+			}
+
+			encMu.Lock()
+			_ = enc.Encode(StreamEvent{
+				Type:           "done",
+				Response:       resp.Response,
+				Question:       resp.Question,
+				Options:        resp.Options,
+				ConversationID: resp.ConversationID,
+			})
+			flusher.Flush()
+			encMu.Unlock()
+			return
+		}
+	}
+
+	resp, err := queryAntigravity(r.Context(), prompt, req.ConversationID, req.ResetSession, nil)
 	if err != nil {
 		log.Printf("[agy-pilot] Antigravity failed: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":"Antigravity execution failed: %s"}`, err.Error()), http.StatusInternalServerError)
@@ -187,7 +247,7 @@ func discoverHub() (string, string) {
 	return "127.0.0.1:" + port, token
 }
 
-func queryAntigravity(ctx context.Context, prompt string, targetConvID string, resetSession bool) (*AskResponse, error) {
+func queryAntigravity(ctx context.Context, prompt string, targetConvID string, resetSession bool, onProgress func(StreamEvent)) (*AskResponse, error) {
 	agyBin := "/root/.gemini/bin/agy"
 	if _, err := os.Stat(agyBin); err != nil {
 		return nil, fmt.Errorf("antigravity binary not found at %s: %w", agyBin, err)
@@ -256,6 +316,10 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 		log.Printf("[agy-pilot] Started new Antigravity session: %s", convID)
 	}
 
+	if onProgress != nil {
+		onProgress(StreamEvent{Type: "start", ConversationID: convID})
+	}
+
 	transcriptPath := filepath.Join("/root/.gemini/antigravity/brain", convID, ".system_generated/logs/transcript.jsonl")
 
 	maxTotalDuration := 240 * time.Second
@@ -263,6 +327,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 	inactivityTimeout := 60 * time.Second
 	lastActivity := time.Now()
 	var lastFileSize int64 = initialOffset
+	lastReportedStep := -1
 
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -293,10 +358,26 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 				return nil, fmt.Errorf("antigravity не отвечает более 60с в %s", convID)
 			}
 
-			reply, question, options, done, err := readTurnResponse(transcriptPath, initialOffset)
+			events, reply, question, options, done, err := readTurnResponse(transcriptPath, initialOffset)
 			if err != nil {
 				continue
 			}
+
+			// Report intermediate tool progress to streaming client
+			for _, ev := range events {
+				if ev.StepIndex > lastReportedStep {
+					lastReportedStep = ev.StepIndex
+					if onProgress != nil && ev.Summary != "" {
+						onProgress(StreamEvent{
+							Type:           "progress",
+							ConversationID: convID,
+							Action:         ev.Name,
+							Summary:        ev.Summary,
+						})
+					}
+				}
+			}
+
 			if done {
 				if reply == "" && question != "" {
 					reply = "❓ " + question
@@ -316,16 +397,16 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 	}
 }
 
-func readTurnResponse(path string, startOffset int64) (string, string, []string, bool, error) {
+func readTurnResponse(path string, startOffset int64) ([]ToolEvent, string, string, []string, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", "", nil, false, err
+		return nil, "", "", nil, false, err
 	}
 	defer file.Close()
 
 	if startOffset > 0 {
 		if _, err := file.Seek(startOffset, io.SeekStart); err != nil {
-			return "", "", nil, false, err
+			return nil, "", "", nil, false, err
 		}
 	}
 
@@ -338,6 +419,7 @@ func readTurnResponse(path string, startOffset int64) (string, string, []string,
 	var questionText string
 	var optionsList []string
 	var foundDone bool
+	var events []ToolEvent
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -360,6 +442,13 @@ func readTurnResponse(path string, startOffset int64) (string, string, []string,
 						if len(opts) > 0 {
 							optionsList = opts
 						}
+					} else {
+						summary := extractToolSummary(tc)
+						events = append(events, ToolEvent{
+							StepIndex: step.StepIndex,
+							Name:      tc.Name,
+							Summary:   summary,
+						})
 					}
 				}
 
@@ -375,9 +464,64 @@ func readTurnResponse(path string, startOffset int64) (string, string, []string,
 	}
 
 	if foundDone && (lastContent != "" || questionText != "" || len(optionsList) > 0) {
-		return lastContent, questionText, optionsList, true, nil
+		return events, lastContent, questionText, optionsList, true, nil
 	}
-	return "", "", nil, false, nil
+	return events, "", "", nil, false, nil
+}
+
+func extractToolSummary(tc ToolCallItem) string {
+	if len(tc.Args) == 0 {
+		return formatToolName(tc.Name)
+	}
+
+	var args map[string]interface{}
+	if err := json.Unmarshal(tc.Args, &args); err != nil {
+		return formatToolName(tc.Name)
+	}
+
+	if s, ok := args["toolSummary"].(string); ok && s != "" {
+		return cleanSummary(s)
+	}
+	if cmd, ok := args["CommandLine"].(string); ok && cmd != "" {
+		clean := cleanSummary(cmd)
+		if len(clean) > 42 {
+			clean = clean[:39] + "..."
+		}
+		return clean
+	}
+	if p, ok := args["Path"].(string); ok && p != "" {
+		return "Файл: " + filepath.Base(cleanSummary(p))
+	}
+	if q, ok := args["query"].(string); ok && q != "" {
+		return "Поиск: " + cleanSummary(q)
+	}
+	return formatToolName(tc.Name)
+}
+
+func cleanSummary(s string) string {
+	s = strings.Trim(s, "\"'\n\r\t ")
+	return s
+}
+
+func formatToolName(name string) string {
+	switch name {
+	case "run_command":
+		return "Команда терминала"
+	case "read_file":
+		return "Чтение файла"
+	case "write_file":
+		return "Запись файла"
+	case "edit_file":
+		return "Редактирование файла"
+	case "search_web":
+		return "Поиск в сети"
+	case "list_plugin_accounts":
+		return "Проверка плагинов"
+	case "manage_task":
+		return "Фоновая задача"
+	default:
+		return name
+	}
 }
 
 func parseAskQuestionArgs(raw json.RawMessage) (string, []string) {
