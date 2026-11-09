@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"io"
 	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +20,7 @@ import (
 	"vpsbot/internal/auth"
 	"vpsbot/internal/cgroups"
 	"vpsbot/internal/config"
+	"vpsbot/internal/formatter"
 	"vpsbot/internal/sysinfo"
 )
 
@@ -93,9 +99,9 @@ func (b *Bot) StartPolling(ctx context.Context) error {
 }
 
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
-	text := strings.TrimSpace(msg.Text)
 	userID := msg.From.ID
 	userName := msg.From.UserName
+	text := strings.TrimSpace(msg.Text)
 
 	// Check user authorization
 	if !b.auth.IsAuthorized(userID) {
@@ -142,7 +148,19 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Remove any old lingering reply keyboards
+	// 1. Handle incoming Photos
+	if msg.Photo != nil && len(msg.Photo) > 0 {
+		b.handleIncomingPhoto(msg)
+		return
+	}
+
+	// 2. Handle incoming Documents
+	if msg.Document != nil {
+		b.handleIncomingDocument(msg)
+		return
+	}
+
+	// 3. Handle Slash Commands
 	if strings.HasPrefix(text, "/") {
 		parts := strings.Fields(text)
 		cmd := strings.ToLower(parts[0])
@@ -153,7 +171,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 		switch cmd {
 		case "/start", "/menu":
-			b.sendMainMenu(msg.Chat.ID, "👋 <b>Панель управления VPS & AI</b>\nВыберите действие в меню ниже или напишите любой вопрос:")
+			b.sendMainMenu(msg.Chat.ID, "👋 <b>Панель управления VPS & AI</b>\nСтарые кнопки удалены. Выберите действие в Inline-меню ниже или напишите любой вопрос:")
 
 		case "/help":
 			b.replyHelp(msg.Chat.ID, userID)
@@ -193,7 +211,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 		case "/send":
 			if len(args) == 0 {
-				b.sendText(msg.Chat.ID, "Укажите путь к файлу: <code>/send /root/test.txt</code>")
+				b.sendText(msg.Chat.ID, "Укажите путь к файлу или папке: <code>/send /root/test.txt</code>")
 				return
 			}
 			b.replySendFile(msg.Chat.ID, args[0])
@@ -283,12 +301,117 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Normal text query -> send to Antigravity AI Bridge
+	// 4. Normal text query -> send to Antigravity AI Bridge
 	b.handleAIQuery(msg.Chat.ID, userID, text)
 }
 
+// ==============================================================================
+// Обработка Фото и Документов (Мультимодальность)
+// ==============================================================================
+
+func (b *Bot) handleIncomingPhoto(msg *tgbotapi.Message) {
+	photos := msg.Photo
+	largest := photos[len(photos)-1]
+
+	_ = b.sendTyping(msg.Chat.ID)
+	statusMsg, _ := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "📸 <i>Загружаю фото и провожу OCR анализ...</i>"))
+
+	timestamp := time.Now().Unix()
+	localPath := fmt.Sprintf("/tmp/user_upload_%d.jpg", timestamp)
+
+	if err := b.downloadTelegramFile(largest.FileID, localPath); err != nil {
+		if statusMsg.MessageID > 0 {
+			_, _ = b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
+		}
+		b.sendText(msg.Chat.ID, fmt.Sprintf("❌ Ошибка сохранения фото: %s", html.EscapeString(err.Error())))
+		return
+	}
+
+	// Run OCR via Tesseract
+	ocrBytes, _ := exec.Command("tesseract", localPath, "stdout", "-l", "rus+eng", "--oem", "1").Output()
+	ocrText := strings.TrimSpace(string(ocrBytes))
+
+	caption := strings.TrimSpace(msg.Caption)
+	if caption == "" {
+		caption = "Что видно на этом изображении? Проанализируй текст и детали."
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString(fmt.Sprintf("Пользователь прислал изображение (сохранено на сервере в '%s').\n", localPath))
+	if ocrText != "" {
+		prompt.WriteString(fmt.Sprintf("Распознанный текст на изображении (Tesseract OCR):\n\"\"\"\n%s\n\"\"\"\n\n", ocrText))
+	}
+	prompt.WriteString(fmt.Sprintf("Вопрос / задание пользователя: %s", caption))
+
+	if statusMsg.MessageID > 0 {
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
+	}
+
+	b.handleAIQuery(msg.Chat.ID, msg.From.ID, prompt.String())
+}
+
+func (b *Bot) handleIncomingDocument(msg *tgbotapi.Message) {
+	doc := msg.Document
+	fileName := doc.FileName
+	if fileName == "" {
+		fileName = "user_document.bin"
+	}
+
+	_ = b.sendTyping(msg.Chat.ID)
+	statusMsg, _ := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("📄 <i>Загружаю файл '%s'...</i>", html.EscapeString(fileName))))
+
+	timestamp := time.Now().Unix()
+	localPath := fmt.Sprintf("/tmp/user_doc_%d_%s", timestamp, filepath.Base(fileName))
+
+	if err := b.downloadTelegramFile(doc.FileID, localPath); err != nil {
+		if statusMsg.MessageID > 0 {
+			_, _ = b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
+		}
+		b.sendText(msg.Chat.ID, fmt.Sprintf("❌ Ошибка сохранения файла: %s", html.EscapeString(err.Error())))
+		return
+	}
+
+	caption := strings.TrimSpace(msg.Caption)
+	if caption == "" {
+		caption = "Пользователь загрузил этот файл. Проанализируй его содержимое или структуру."
+	}
+
+	prompt := fmt.Sprintf("Пользователь отправил файл '%s' (сохранен на сервере в '%s').\nВопрос / задание пользователя: %s", fileName, localPath, caption)
+
+	if statusMsg.MessageID > 0 {
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
+	}
+
+	b.handleAIQuery(msg.Chat.ID, msg.From.ID, prompt)
+}
+
+func (b *Bot) downloadTelegramFile(fileID, destPath string) error {
+	fileURL, err := b.api.GetFileDirectURL(fileID)
+	if err != nil {
+		return fmt.Errorf("ошибка получения URL файла: %w", err)
+	}
+
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return fmt.Errorf("ошибка скачивания файла: %w", err)
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("ошибка создания локального файла: %w", err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+// ==============================================================================
+// Обработка CallbackQuery (Inline Кнопки)
+// ==============================================================================
+
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
-	// Acknowledge callback immediately
 	ack := tgbotapi.NewCallback(cb.ID, "")
 	_, _ = b.api.Request(ack)
 
@@ -302,7 +425,7 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	// Handle interactive AI options (ask_question)
+	// Interactive AI options (ask_question)
 	if strings.HasPrefix(data, "ai_opt:") {
 		selectedOpt := strings.TrimPrefix(data, "ai_opt:")
 		b.handleAIQuery(chatID, userID, selectedOpt)
@@ -359,6 +482,12 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 
 	case "act_ls_root":
 		b.replyListFiles(chatID, "/root")
+
+	case "act_prompt_file":
+		b.sendText(chatID, "📁 <b>Запрос файлов и папок с сервера:</b>\n\nОтправьте команду:\n<code>/send /путь/к/файлу</code>\nили\n<code>/send /путь/к/папке</code> <i>(папка автоматически упакуется в ZIP)</i>\n\nНапример:\n• <code>/send /etc/os-release</code>\n• <code>/send /opt/superbot</code>")
+
+	case "act_prompt_photo":
+		b.sendText(chatID, "📸 <b>Анализ фото, скриншотов и документов:</b>\n\nПросто отправьте в диалог любую фотографию или файл (с подписью или без).\nБот сохранит изображение, распознает текст через OCR и передаст в Antigravity!")
 
 	case "act_mode_ai":
 		if b.checkAdmin(chatID, userID) {
@@ -417,20 +546,28 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 func (b *Bot) getMainMenuMarkup() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📬 Почта (Fast)", "act_mail"),
-			tgbotapi.NewInlineKeyboardButtonData("📊 Статус (Fast)", "act_status"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⚡ Приоритеты", "menu_prio"),
+			tgbotapi.NewInlineKeyboardButtonData("📬 Почта", "act_mail"),
+			tgbotapi.NewInlineKeyboardButtonData("📊 Статус", "act_status"),
 			tgbotapi.NewInlineKeyboardButtonData("⚙️ Все функции", "menu_all"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⚡ Приоритеты", "menu_prio"),
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Новый диалог ИИ", "act_new_ai"),
 		),
 	)
 }
 
 func (b *Bot) sendMainMenu(chatID int64, text string) {
+	// First: explicitly remove old cached reply keyboard from phone
+	rmMsg := tgbotapi.NewMessage(chatID, "🔄 <i>Очистка старых кнопок...</i>")
+	rmMsg.ParseMode = "HTML"
+	rmMsg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
+	sent, err := b.api.Send(rmMsg)
+	if err == nil {
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, sent.MessageID))
+	}
+
+	// Second: send the clean Inline Menu
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	msg.ReplyMarkup = b.getMainMenuMarkup()
@@ -450,26 +587,27 @@ func (b *Bot) editOrSendMenu(chatID int64, msgID int, text string) {
 func (b *Bot) showAllFunctionsMenu(chatID int64, msgID int) {
 	markup := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🖥 Сервер & Память", "menu_server"),
-			tgbotapi.NewInlineKeyboardButtonData("🌐 Сеть & IP", "menu_net"),
+			tgbotapi.NewInlineKeyboardButtonData("🖥 Сервер", "menu_server"),
+			tgbotapi.NewInlineKeyboardButtonData("🧠 ИИ", "menu_ai"),
+			tgbotapi.NewInlineKeyboardButtonData("📁 Файлы", "menu_files"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📁 Файлы", "menu_files"),
-			tgbotapi.NewInlineKeyboardButtonData("🧠 ИИ & Сессии", "menu_ai"),
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Сеть & IP", "menu_net"),
+			tgbotapi.NewInlineKeyboardButtonData("📸 Анализ фото", "act_prompt_photo"),
+			tgbotapi.NewInlineKeyboardButtonData("📁 Запросить файл", "act_prompt_file"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("👑 Пользователи", "menu_users"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад", "menu_main"),
 		),
 	)
 
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, "⚙️ <b>Все функции сервера:</b>\nВыберите категорию для управления:")
+	text := "⚙️ <b>Все функции сервера:</b>\nВыберите категорию для управления:"
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ParseMode = "HTML"
 	edit.ReplyMarkup = &markup
 	if _, err := b.api.Send(edit); err != nil {
-		msg := tgbotapi.NewMessage(chatID, "⚙️ <b>Все функции сервера:</b>\nВыберите категорию для управления:")
+		msg := tgbotapi.NewMessage(chatID, text)
 		msg.ParseMode = "HTML"
 		msg.ReplyMarkup = markup
 		_, _ = b.api.Send(msg)
@@ -522,14 +660,15 @@ func (b *Bot) showFilesMenu(chatID int64, msgID int) {
 	markup := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📂 Список /root", "act_ls_root"),
-			tgbotapi.NewInlineKeyboardButtonURL("🔗 FileBrowser Web", fileBrowserURL),
+			tgbotapi.NewInlineKeyboardButtonData("📥 Запросить файл", "act_prompt_file"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔗 FileBrowser Web", fileBrowserURL),
 			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад к категориям", "menu_all"),
 		),
 	)
 
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, "📁 <b>Файловый менеджер:</b>\nПросматривайте файлы или откройте веб-интерфейс FileBrowser:")
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, "📁 <b>Файловый менеджер:</b>\nПросматривайте файлы, скачивайте ZIP-архивы или откройте веб-интерфейс FileBrowser:")
 	edit.ParseMode = "HTML"
 	edit.ReplyMarkup = &markup
 	_, _ = b.api.Send(edit)
@@ -586,7 +725,7 @@ func (b *Bot) showAIMenu(chatID int64, msgID int, userID int64) {
 		),
 	)
 
-	text := fmt.Sprintf("🧠 <b>Интеллектуальный агент Antigravity:</b>\n%s\n\nМост: <code>agy-pilot (:43430)</code>\nДля общения просто напишите вопрос в чат.", statusText)
+	text := fmt.Sprintf("🧠 <b>Интеллектуальный агент Antigravity:</b>\n%s\n\nМодель: <code>gemini-3.8-flash-high</code>\nМост: <code>agy-pilot (:43430)</code>\nДля общения просто напишите вопрос в чат.", statusText)
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ParseMode = "HTML"
 	edit.ReplyMarkup = &markup
@@ -642,7 +781,7 @@ func (b *Bot) replyNetInfo(chatID int64) {
 }
 
 func (b *Bot) replyMail(chatID int64) {
-	_, _ = b.api.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+	_ = b.sendTyping(chatID)
 	waitMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "📬 <i>Проверяю почтовые ящики (Gmail & Mail.ru)...</i>"))
 
 	out, err := b.sys.CheckMail()
@@ -703,19 +842,28 @@ func (b *Bot) replyFind(chatID int64, pattern string) {
 	b.sendText(chatID, out)
 }
 
-func (b *Bot) replySendFile(chatID int64, filePath string) {
-	cleanPath, err := b.sys.ValidateFileForSending(filePath)
+func (b *Bot) replySendFile(chatID int64, rawPath string) {
+	filePath, isZip, err := formatter.PrepareFileForSending(rawPath)
 	if err != nil {
 		b.sendText(chatID, fmt.Sprintf("❌ %s", html.EscapeString(err.Error())))
 		return
 	}
 
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(cleanPath))
-	doc.Caption = fmt.Sprintf("📄 <code>%s</code>", html.EscapeString(cleanPath))
+	if isZip {
+		defer os.Remove(filePath)
+	}
+
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+	docName := filepath.Base(filePath)
+	if isZip {
+		doc.Caption = fmt.Sprintf("📦 <b>ZIP-архив папки:</b> <code>%s</code>", html.EscapeString(rawPath))
+	} else {
+		doc.Caption = fmt.Sprintf("📄 <code>%s</code>", html.EscapeString(rawPath))
+	}
 	doc.ParseMode = "HTML"
 
 	if _, err := b.api.Send(doc); err != nil {
-		b.sendText(chatID, fmt.Sprintf("❌ Ошибка отправки файла: %s", html.EscapeString(err.Error())))
+		b.sendText(chatID, fmt.Sprintf("❌ Ошибка отправки документа '%s': %s", docName, html.EscapeString(err.Error())))
 	}
 }
 
@@ -800,7 +948,7 @@ func (b *Bot) replyHelp(chatID, userID int64) {
 	sb.WriteString("• /top — Топ процессов по памяти\n")
 	sb.WriteString("• /ls &lt;путь&gt; — Просмотр файлов в папке\n")
 	sb.WriteString("• /find &lt;маска&gt; — Поиск файлов\n")
-	sb.WriteString("• /send &lt;путь&gt; — Скачать файл в Telegram\n")
+	sb.WriteString("• /send &lt;путь&gt; — Скачать файл или ZIP папки в Telegram\n")
 	sb.WriteString("• /new — Сбросить контекст диалога с ИИ\n\n")
 
 	if isAdmin {
@@ -813,7 +961,7 @@ func (b *Bot) replyHelp(chatID, userID int64) {
 	}
 
 	sb.WriteString("<b>🧠 Интеллектуальный агент:</b>\n")
-	sb.WriteString("<i>Отправьте любой текст без слэша, чтобы передать сложную задачу ядру Antigravity.</i>")
+	sb.WriteString("<i>Отправьте любой текст или фото, чтобы передать задачу в Antigravity.</i>")
 
 	b.sendTextWithMenu(chatID, sb.String())
 }
@@ -826,20 +974,25 @@ func (b *Bot) checkAdmin(chatID, userID int64) bool {
 	return true
 }
 
+func (b *Bot) sendTyping(chatID int64) error {
+	_, err := b.api.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+	return err
+}
+
 // ==============================================================================
-// Antigravity AI Bridge & Interactive Options
+// Antigravity AI Bridge, Interactive Options & File Delivery
 // ==============================================================================
 
 func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
-	_, _ = b.api.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+	_ = b.sendTyping(chatID)
 
-	waitMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, "🤔 <i>Передаю запрос в Antigravity. Думаю...</i>"))
+	waitMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, "⏳ <i>Думаю и выполняю задачу...</i>"))
 	waitMsgID := 0
 	if err == nil {
 		waitMsgID = waitMsg.MessageID
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 
 	activeConvID := b.getSession(userID)
@@ -860,10 +1013,13 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 		b.setSession(userID, resp.ConversationID)
 	}
 
-	reply := resp.Text
-	if reply == "" && resp.Question != "" {
-		reply = "❓ <b>" + html.EscapeString(resp.Question) + "</b>"
+	rawReply := resp.Text
+	if rawReply == "" && resp.Question != "" {
+		rawReply = "❓ <b>" + html.EscapeString(resp.Question) + "</b>"
 	}
+
+	// Format reply: Convert Markdown to clean Telegram HTML & extract server files
+	formatted := formatter.ConvertMarkdownToTelegramHTML(rawReply)
 
 	// Prepare inline buttons if ask_question options were returned
 	var optMarkup *tgbotapi.InlineKeyboardMarkup
@@ -887,13 +1043,20 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 		optMarkup = &markup
 	}
 
-	// Remove typing message
+	// Remove wait message
 	if waitMsgID > 0 {
 		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, waitMsgID))
 	}
 
-	// Deliver reply safely (splitting chunks if necessary)
-	b.sendHTMLChunked(chatID, reply, optMarkup)
+	// Deliver reply safely
+	b.sendHTMLChunked(chatID, formatted.HTMLText, optMarkup)
+
+	// Automatically send any server files referenced in the response (e.g. file:///etc/os-release)
+	for _, fPath := range formatted.Files {
+		if _, err := os.Stat(fPath); err == nil {
+			b.replySendFile(chatID, fPath)
+		}
+	}
 }
 
 // ==============================================================================
@@ -919,14 +1082,12 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 			msg.ReplyMarkup = markup
 		}
 		if _, err := b.api.Send(msg); err != nil {
-			// Fallback to plain text if HTML parsing failed
 			msg.ParseMode = ""
 			_, _ = b.api.Send(msg)
 		}
 		return
 	}
 
-	// Split by paragraphs
 	lines := strings.Split(text, "\n")
 	var currentChunk strings.Builder
 
