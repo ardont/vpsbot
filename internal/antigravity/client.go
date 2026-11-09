@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // Client handles communication with Antigravity / agy-pilot bridge.
@@ -26,7 +25,8 @@ func NewClient(apiURL string) *Client {
 	return &Client{
 		apiURL: strings.TrimRight(apiURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 240 * time.Second,
+			// No global HTTP timeout for streaming responses — lifecycle is managed via Context
+			Timeout: 0,
 		},
 	}
 }
@@ -114,7 +114,7 @@ func (c *Client) AskStream(ctx context.Context, prompt string, convID string, re
 	var finalResp *Response
 	scanner := bufio.NewScanner(resp.Body)
 	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, 2*1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -152,6 +152,10 @@ func (c *Client) AskStream(ctx context.Context, prompt string, convID string, re
 		case "error":
 			return nil, fmt.Errorf("%s", ev.Error)
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка чтения потока ответа Antigravity: %w", err)
 	}
 
 	if finalResp != nil {

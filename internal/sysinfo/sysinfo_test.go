@@ -68,3 +68,14 @@ func TestSysInfo_GetStats(t *testing.T) {
 	}
 }
 
+
+func TestSysInfo_GetBackupInfo(t *testing.T) {
+	sys := sysinfo.New("/")
+	info, err := sys.GetBackupInfo()
+	if err != nil {
+		t.Fatalf("GetBackupInfo failed: %v", err)
+	}
+	if len(info) == 0 {
+		t.Error("expected non-empty backup info")
+	}
+}

@@ -961,7 +961,7 @@ func (b *Bot) replyBackupInfo(chatID int64) {
 
 func (b *Bot) replyCreateBackup(chatID int64) {
 	_ = b.sendTyping(chatID)
-	waitMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "📦 <i>Создаю полный ZIP-архив наработок... (это займет 5-10 сек)</i>"))
+	waitMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "📦 <i>Создаю полный ZIP-архив наработок... (это займет несколько секунд)</i>"))
 
 	out, err := b.sys.CreateBackup()
 	if waitMsg.MessageID > 0 {
@@ -973,7 +973,13 @@ func (b *Bot) replyCreateBackup(chatID int64) {
 		return
 	}
 
-	b.sendTextWithMenu(chatID, out)
+	markup := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Создать свежий бэкап", "act_create_backup"),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
+		),
+	)
+	b.sendHTMLChunked(chatID, out, &markup)
 }
 
 func (b *Bot) replyRecentErrors(chatID int64) {
@@ -1200,7 +1206,7 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 		waitMsgID = waitMsg.MessageID
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
 	defer cancel()
 
 	// Keep typing indicator active while Antigravity thinks and executes tool calls

@@ -510,7 +510,7 @@ func (s *SysInfo) GetBackupInfo() (string, error) {
 	}
 
 	if latestName == "" {
-		return "📦 <b>Бэкапы не найдены.</b>\nИспользуйте команду <code>/backup</code> для создания архива.", nil
+		return "📦 <b>Бэкапы не найдены.</b>\nИспользуйте кнопку ниже или команду <code>/make_backup</code> для создания архива.", nil
 	}
 
 	directURL := fmt.Sprintf("http://100.89.7.20:8080/files/backups/%s", latestName)
@@ -529,7 +529,7 @@ func (s *SysInfo) GetBackupInfo() (string, error) {
 	return sb.String(), nil
 }
 
-// CreateBackup generates a new zip backup in /opt/filebrowser/backups.
+// CreateBackup generates a new zip backup in /opt/filebrowser/backups via make_backup.sh.
 func (s *SysInfo) CreateBackup() (string, error) {
 	backupDir := "/opt/filebrowser/backups"
 	_ = os.MkdirAll(backupDir, 0755)
@@ -537,24 +537,18 @@ func (s *SysInfo) CreateBackup() (string, error) {
 	zipName := fmt.Sprintf("backup_%s.zip", time.Now().Format("2006-01-02"))
 	zipPath := filepath.Join(backupDir, zipName)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Only backup source code, configs, scripts — exclude Go module cache and large binaries
-	cmd := exec.CommandContext(ctx, "zip", "-r", zipPath,
-		"/root/vpsbot",
-		"/opt/superbot",
-		"/etc/systemd/system",
-		"/etc/sysctl.d",
-		"/etc/x-ui",
-		"-x", "*/node_modules/*", "*/logs/*", "*.log", "*/.git/*",
-		"/root/go/*",
-		"/opt/superbot/agy-pilot/agy-pilot",
-		"/opt/superbot/google-mcp",
-		"/opt/filebrowser/backups/*")
+	scriptPath := "/opt/superbot/make_backup.sh"
+	if _, err := os.Stat(scriptPath); err != nil {
+		scriptPath = "/root/vpsbot/scripts/make_backup.sh"
+	}
+
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("ошибка создания ZIP: %s (%w)", string(out), err)
+		return "", fmt.Errorf("ошибка создания бэкапа: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 
 	info, err := os.Stat(zipPath)
@@ -563,7 +557,18 @@ func (s *SysInfo) CreateBackup() (string, error) {
 	}
 
 	directURL := fmt.Sprintf("http://100.89.7.20:8080/files/backups/%s", zipName)
-	return fmt.Sprintf("✅ <b>Свежий бэкап успешно создан!</b>\n\n├ <b>Файл:</b> <code>%s</code>\n├ <b>Размер:</b> <code>%s</code>\n└ <b>Ссылка:</b> <a href=\"%s\">Скачать через FileBrowser</a>", zipName, formatFileSize(info.Size()), directURL), nil
+	tsURL := fmt.Sprintf("https://vm-576151.tailb9b76e.ts.net:10443/files/backups/%s", zipName)
+
+	var sb strings.Builder
+	sb.WriteString("✅ <b>Свежий бэкап успешно создан!</b>\n\n")
+	sb.WriteString(fmt.Sprintf("├ <b>Файл:</b> <code>%s</code>\n", zipName))
+	sb.WriteString(fmt.Sprintf("├ <b>Размер:</b> <code>%s</code>\n", formatFileSize(info.Size())))
+	sb.WriteString(fmt.Sprintf("└ <b>Создан:</b> <code>%s</code>\n\n", info.ModTime().Format("02.01.2006 15:04:05")))
+	sb.WriteString("🔗 <b>Ссылки на скачивание (FileBrowser):</b>\n")
+	sb.WriteString(fmt.Sprintf("• <a href=\"%s\">Tailscale IP (100.89.7.20:8080)</a>\n", directURL))
+	sb.WriteString(fmt.Sprintf("• <a href=\"%s\">Tailscale HTTPS (MagicDNS)</a>", tsURL))
+
+	return sb.String(), nil
 }
 
 // GetServiceLogs returns the last N lines of a systemd service journal.
