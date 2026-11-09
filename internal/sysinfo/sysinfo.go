@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"strconv"
 	"net/http"
 	"os"
 	"os/exec"
@@ -536,12 +537,21 @@ func (s *SysInfo) CreateBackup() (string, error) {
 	zipName := fmt.Sprintf("backup_%s.zip", time.Now().Format("2006-01-02"))
 	zipPath := filepath.Join(backupDir, zipName)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
+	// Only backup source code, configs, scripts — exclude Go module cache and large binaries
 	cmd := exec.CommandContext(ctx, "zip", "-r", zipPath,
-		"/root", "/opt", "/etc/systemd/system", "/etc/x-ui",
-		"-x", "*/node_modules/*", "*/logs/*", "*.log", "*/.git/*", "/root/.npm/*", "/root/.cache/*", "/opt/filebrowser/backups/*")
+		"/root/vpsbot",
+		"/opt/superbot",
+		"/etc/systemd/system",
+		"/etc/sysctl.d",
+		"/etc/x-ui",
+		"-x", "*/node_modules/*", "*/logs/*", "*.log", "*/.git/*",
+		"/root/go/*",
+		"/opt/superbot/agy-pilot/agy-pilot",
+		"/opt/superbot/google-mcp",
+		"/opt/filebrowser/backups/*")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("ошибка создания ZIP: %s (%w)", string(out), err)
@@ -554,4 +564,20 @@ func (s *SysInfo) CreateBackup() (string, error) {
 
 	directURL := fmt.Sprintf("http://100.89.7.20:8080/files/backups/%s", zipName)
 	return fmt.Sprintf("✅ <b>Свежий бэкап успешно создан!</b>\n\n├ <b>Файл:</b> <code>%s</code>\n├ <b>Размер:</b> <code>%s</code>\n└ <b>Ссылка:</b> <a href=\"%s\">Скачать через FileBrowser</a>", zipName, formatFileSize(info.Size()), directURL), nil
+}
+
+// GetServiceLogs returns the last N lines of a systemd service journal.
+func (s *SysInfo) GetServiceLogs(service string, lines int) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "journalctl", "-u", service, "-n", strconv.Itoa(lines), "--no-pager", "--output=short")
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if err != nil && result == "" {
+		return "", fmt.Errorf("ошибка чтения журнала %s: %w", service, err)
+	}
+	if result == "" {
+		return fmt.Sprintf("📋 <b>Лог %s:</b>\n<i>Записей не найдено</i>", service), nil
+	}
+	return fmt.Sprintf("📋 <b>Лог %s (последние %d строк):</b>\n<pre>%s</pre>", service, lines, html.EscapeString(result)), nil
 }

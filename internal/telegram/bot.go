@@ -26,14 +26,15 @@ import (
 
 // Bot manages Telegram updates, user authorization, inline menus, and AI bridge.
 type Bot struct {
-	api      *tgbotapi.BotAPI
-	cfg      *config.Config
-	auth     *auth.Store
-	sys      *sysinfo.SysInfo
-	cg       *cgroups.Manager
-	aiCli    *antigravity.Client
-	sessions map[int64]string
-	sessMu   sync.RWMutex
+	api        *tgbotapi.BotAPI
+	cfg        *config.Config
+	auth       *auth.Store
+	sys        *sysinfo.SysInfo
+	cg         *cgroups.Manager
+	aiCli      *antigravity.Client
+	sessions   map[int64]string
+	sessMu     sync.RWMutex
+	lastKbSent sync.Map // map[int64]time.Time — throttle persistent keyboard resend
 }
 
 // New creates a new Telegram bot router.
@@ -179,6 +180,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	case "📦 Бэкап", "📦 Бэкапы":
 		b.replyBackupInfo(msg.Chat.ID)
+		return
+	case "📋 Логи", "📋 Логи сервисов":
+		b.replyLogsMenu(msg.Chat.ID)
 		return
 	case "🔄 Новый диалог", "🔄 Новый диалог ИИ", "🔄 Сброс контекста":
 		b.setSession(userID, "")
@@ -532,6 +536,38 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 	case "act_errors":
 		b.replyRecentErrors(chatID)
 
+	case "act_log_superbot":
+		out, err := b.sys.GetServiceLogs("superbot", 20)
+		if err != nil {
+			b.sendText(chatID, "❌ "+err.Error())
+		} else {
+			b.sendText(chatID, out)
+		}
+
+	case "act_log_agypilot":
+		out, err := b.sys.GetServiceLogs("agy-pilot", 20)
+		if err != nil {
+			b.sendText(chatID, "❌ "+err.Error())
+		} else {
+			b.sendText(chatID, out)
+		}
+
+	case "act_log_omniroute":
+		out, err := b.sys.GetServiceLogs("omniroute", 20)
+		if err != nil {
+			b.sendText(chatID, "❌ "+err.Error())
+		} else {
+			b.sendText(chatID, out)
+		}
+
+	case "act_log_xui":
+		out, err := b.sys.GetServiceLogs("x-ui", 20)
+		if err != nil {
+			b.sendText(chatID, "❌ "+err.Error())
+		} else {
+			b.sendText(chatID, out)
+		}
+
 	case "act_status":
 		b.replyQuickStatus(chatID)
 
@@ -640,6 +676,7 @@ func (b *Bot) getPersistentKeyboard() tgbotapi.ReplyKeyboardMarkup {
 			tgbotapi.NewKeyboardButton("📦 Бэкап"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📋 Логи"),
 			tgbotapi.NewKeyboardButton("🔄 Новый диалог"),
 			tgbotapi.NewKeyboardButton("⚙️ Меню"),
 		),
@@ -654,6 +691,8 @@ func (b *Bot) sendPersistentKeyboard(chatID int64, text string) {
 	msg.ParseMode = "HTML"
 	msg.ReplyMarkup = b.getPersistentKeyboard()
 	_, _ = b.api.Send(msg)
+	// Reset throttle so the keyboard is treated as "just sent"
+	b.lastKbSent.Store(chatID, time.Now())
 }
 
 func (b *Bot) sendMainMenu(chatID int64, text string) {
@@ -944,6 +983,26 @@ func (b *Bot) replyRecentErrors(chatID int64) {
 		return
 	}
 	b.sendText(chatID, out)
+}
+
+func (b *Bot) replyLogsMenu(chatID int64) {
+	markup := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🤖 SuperBot", "act_log_superbot"),
+			tgbotapi.NewInlineKeyboardButtonData("🌉 AGY-Pilot", "act_log_agypilot"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🌐 OmniRoute", "act_log_omniroute"),
+			tgbotapi.NewInlineKeyboardButtonData("🔒 X-UI VPN", "act_log_xui"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⚠️ Системные ошибки", "act_errors"),
+		),
+	)
+	msg := tgbotapi.NewMessage(chatID, "📋 <b>Логи сервисов</b>\nВыберите сервис (последние 20 строк):")
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = markup
+	_, _ = b.api.Send(msg)
 }
 
 func (b *Bot) replyStats(chatID int64) {
@@ -1268,13 +1327,30 @@ func (b *Bot) sendTextWithMenu(chatID int64, text string) {
 
 func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.InlineKeyboardMarkup) {
 	const maxChunk = 3900
+	const kbThrottle = 10 * time.Minute
+
+	// Decide whether to attach the persistent keyboard this time.
+	// Only re-send it if it hasn't been sent to this chat in the last 10 minutes.
+	shouldSendKb := func() bool {
+		if markup != nil {
+			return false // inline markup takes priority, skip persistent kb
+		}
+		now := time.Now()
+		if last, ok := b.lastKbSent.Load(chatID); ok {
+			if now.Sub(last.(time.Time)) < kbThrottle {
+				return false
+			}
+		}
+		b.lastKbSent.Store(chatID, now)
+		return true
+	}
 
 	if len(text) <= maxChunk {
 		msg := tgbotapi.NewMessage(chatID, text)
 		msg.ParseMode = "HTML"
 		if markup != nil {
 			msg.ReplyMarkup = markup
-		} else {
+		} else if shouldSendKb() {
 			kb := b.getPersistentKeyboard()
 			msg.ReplyMarkup = kb
 		}
@@ -1307,7 +1383,7 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 		msg.ParseMode = "HTML"
 		if markup != nil {
 			msg.ReplyMarkup = markup
-		} else {
+		} else if shouldSendKb() {
 			kb := b.getPersistentKeyboard()
 			msg.ReplyMarkup = kb
 		}
