@@ -282,6 +282,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 		// Send message to active conversation
 		log.Printf("[agy-pilot] Continuing session %s via send-message (offset: %d)...", convID, initialOffset)
 		cmd := exec.CommandContext(ctx, agyBin, "agentapi", "send-message", convID, prompt)
+		cmd.Dir = "/root"
 		cmd.Env = cleanEnv
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -295,6 +296,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 		// Start a fresh conversation
 		log.Printf("[agy-pilot] Creating new Antigravity session...")
 		cmd := exec.CommandContext(ctx, agyBin, "agentapi", "new-conversation", "--model=flash", prompt)
+		cmd.Dir = "/root"
 		cmd.Env = cleanEnv
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
