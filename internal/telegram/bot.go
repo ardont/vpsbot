@@ -160,7 +160,30 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// 3. Handle Slash Commands
+	// 3. Handle Persistent Bottom Keyboard Buttons
+	switch strings.TrimSpace(text) {
+	case "📬 Почта":
+		b.replyMail(msg.Chat.ID)
+		return
+	case "📊 Статус", "📊 Сервер":
+		b.replyQuickStatus(msg.Chat.ID)
+		return
+	case "⚙️ Меню", "⚙️ Все функции":
+		b.sendMainMenu(msg.Chat.ID, "⚙️ <b>Главное меню SuperBot:</b>\nВыберите действие или категорию:")
+		return
+	case "⚡ Приоритеты", "⚡ Турбо Режим":
+		b.sendPriorityMenu(msg.Chat.ID)
+		return
+	case "🌐 Сеть & TS", "🌍 Сеть & TS", "🌐 Сеть":
+		b.replyNetInfo(msg.Chat.ID)
+		return
+	case "🔄 Новый диалог", "🔄 Новый диалог ИИ", "🔄 Сброс контекста":
+		b.setSession(userID, "")
+		b.sendText(msg.Chat.ID, "🔄 <b>Контекст очищен!</b>\nНачат новый диалог с Antigravity. Задайте любой вопрос или отправьте файл.")
+		return
+	}
+
+	// 4. Handle Slash Commands
 	if strings.HasPrefix(text, "/") {
 		parts := strings.Fields(text)
 		cmd := strings.ToLower(parts[0])
@@ -171,7 +194,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 		switch cmd {
 		case "/start", "/menu":
-			b.sendMainMenu(msg.Chat.ID, "👋 <b>Панель управления VPS & AI</b>\nСтарые кнопки удалены. Выберите действие в Inline-меню ниже или напишите любой вопрос:")
+			b.sendPersistentKeyboard(msg.Chat.ID, "👋 <b>Добро пожаловать в SuperBot!</b>\nКнопки быстрого доступа закреплены внизу экрана 👇")
+			b.sendMainMenu(msg.Chat.ID, "⚙️ <b>Интерактивные разделы:</b>")
 
 		case "/help":
 			b.replyHelp(msg.Chat.ID, userID)
@@ -557,17 +581,32 @@ func (b *Bot) getMainMenuMarkup() tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
-func (b *Bot) sendMainMenu(chatID int64, text string) {
-	// First: explicitly remove old cached reply keyboard from phone
-	rmMsg := tgbotapi.NewMessage(chatID, "🔄 <i>Очистка старых кнопок...</i>")
-	rmMsg.ParseMode = "HTML"
-	rmMsg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
-	sent, err := b.api.Send(rmMsg)
-	if err == nil {
-		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, sent.MessageID))
-	}
+func (b *Bot) getPersistentKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	keyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📬 Почта"),
+			tgbotapi.NewKeyboardButton("📊 Статус"),
+			tgbotapi.NewKeyboardButton("⚙️ Меню"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("⚡ Приоритеты"),
+			tgbotapi.NewKeyboardButton("🌐 Сеть & TS"),
+			tgbotapi.NewKeyboardButton("🔄 Новый диалог"),
+		),
+	)
+	keyboard.ResizeKeyboard = true
+	keyboard.InputFieldPlaceholder = "Спросите ИИ или выберите команду..."
+	return keyboard
+}
 
-	// Second: send the clean Inline Menu
+func (b *Bot) sendPersistentKeyboard(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = b.getPersistentKeyboard()
+	_, _ = b.api.Send(msg)
+}
+
+func (b *Bot) sendMainMenu(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	msg.ReplyMarkup = b.getMainMenuMarkup()
@@ -1080,6 +1119,9 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 		msg.ParseMode = "HTML"
 		if markup != nil {
 			msg.ReplyMarkup = markup
+		} else {
+			kb := b.getPersistentKeyboard()
+			msg.ReplyMarkup = kb
 		}
 		if _, err := b.api.Send(msg); err != nil {
 			msg.ParseMode = ""
@@ -1110,6 +1152,9 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 		msg.ParseMode = "HTML"
 		if markup != nil {
 			msg.ReplyMarkup = markup
+		} else {
+			kb := b.getPersistentKeyboard()
+			msg.ReplyMarkup = kb
 		}
 		if _, err := b.api.Send(msg); err != nil {
 			msg.ParseMode = ""
