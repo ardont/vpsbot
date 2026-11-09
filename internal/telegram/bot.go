@@ -1031,8 +1031,24 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 		waitMsgID = waitMsg.MessageID
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
+
+	// Keep typing indicator active while Antigravity thinks and executes tool calls
+	stopTyping := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopTyping:
+				return
+			case <-ticker.C:
+				_ = b.sendTyping(chatID)
+			}
+		}
+	}()
+	defer close(stopTyping)
 
 	activeConvID := b.getSession(userID)
 	resp, err := b.aiCli.Ask(ctx, prompt, activeConvID, false)

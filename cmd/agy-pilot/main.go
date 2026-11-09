@@ -258,8 +258,13 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 
 	transcriptPath := filepath.Join("/root/.gemini/antigravity/brain", convID, ".system_generated/logs/transcript.jsonl")
 
-	deadline := time.Now().Add(60 * time.Second)
-	ticker := time.NewTicker(150 * time.Millisecond)
+	maxTotalDuration := 240 * time.Second
+	deadline := time.Now().Add(maxTotalDuration)
+	inactivityTimeout := 60 * time.Second
+	lastActivity := time.Now()
+	var lastFileSize int64 = initialOffset
+
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -267,13 +272,25 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("timeout waiting for Antigravity response in %s", convID)
+			now := time.Now()
+			if now.After(deadline) {
+				return nil, fmt.Errorf("общий таймаут выполнения запроса (240с) превышен в %s", convID)
 			}
 
 			stat, err := os.Stat(transcriptPath)
 			if err != nil || stat.Size() <= initialOffset {
+				if now.Sub(lastActivity) > inactivityTimeout {
+					return nil, fmt.Errorf("timeout waiting for Antigravity response in %s", convID)
+				}
 				continue
+			}
+
+			// If file size changed, Antigravity is actively executing tool calls or outputting content
+			if stat.Size() > lastFileSize {
+				lastFileSize = stat.Size()
+				lastActivity = now
+			} else if now.Sub(lastActivity) > inactivityTimeout {
+				return nil, fmt.Errorf("antigravity не отвечает более 60с в %s", convID)
 			}
 
 			reply, question, options, done, err := readTurnResponse(transcriptPath, initialOffset)
@@ -331,9 +348,11 @@ func readTurnResponse(path string, startOffset int64) (string, string, []string,
 					lastContent = step.Content
 				}
 
-				// Check tool calls for ask_question
+				hasTools := len(step.ToolCalls) > 0
+				hasAskQuestion := false
 				for _, tc := range step.ToolCalls {
 					if tc.Name == "ask_question" {
+						hasAskQuestion = true
 						q, opts := parseAskQuestionArgs(tc.Args)
 						if q != "" {
 							questionText = q
@@ -344,8 +363,12 @@ func readTurnResponse(path string, startOffset int64) (string, string, []string,
 					}
 				}
 
-				if step.Status == "DONE" {
+				// The turn is complete when the model produced final content without further tool calls,
+				// or when it explicitly called ask_question.
+				if step.Status == "DONE" && (!hasTools || hasAskQuestion) {
 					foundDone = true
+				} else {
+					foundDone = false
 				}
 			}
 		}

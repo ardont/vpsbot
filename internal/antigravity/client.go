@@ -25,7 +25,7 @@ func NewClient(apiURL string) *Client {
 	return &Client{
 		apiURL: strings.TrimRight(apiURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 240 * time.Second,
 		},
 	}
 }
