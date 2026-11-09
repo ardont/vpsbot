@@ -166,14 +166,14 @@ func (s *SysInfo) GetNetworkAndIP() (string, error) {
 
 // CheckMail calls the fast local IMAP checker script.
 func (s *SysInfo) CheckMail() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "python3", "/opt/superbot/check_mail.py")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("таймаут при проверке почтовых серверов (12 сек)")
+			return "", fmt.Errorf("таймаут при проверке почтовых серверов (20 сек)")
 		}
 		return "", fmt.Errorf("ошибка проверки почты: %s (%w)", string(out), err)
 	}
@@ -456,4 +456,102 @@ func formatFileSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// GetRecentErrors returns the latest critical/error entries from journalctl.
+func (s *SysInfo) GetRecentErrors() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "journalctl", "-p", "3", "-xb", "-n", "8", "--no-pager")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ошибка чтения журнала: %w", err)
+	}
+
+	lines := strings.TrimSpace(string(out))
+	if lines == "" || strings.Contains(lines, "-- No entries --") {
+		return "✅ <b>Критических ошибок в журнале системы не обнаружено!</b>\nВсе сервисы работают штатно.", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("⚠️ <b>Последние системные ошибки (journalctl -p 3):</b>\n<pre>")
+	sb.WriteString(html.EscapeString(lines))
+	sb.WriteString("</pre>")
+	return sb.String(), nil
+}
+
+// GetBackupInfo returns information about the latest backup in /opt/filebrowser/backups.
+func (s *SysInfo) GetBackupInfo() (string, error) {
+	backupDir := "/opt/filebrowser/backups"
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return "", fmt.Errorf("папка бэкапов не найдена: %w", err)
+	}
+
+	var latestName string
+	var latestSize int64
+	var latestMod time.Time
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".zip") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latestMod) {
+			latestMod = info.ModTime()
+			latestName = entry.Name()
+			latestSize = info.Size()
+		}
+	}
+
+	if latestName == "" {
+		return "📦 <b>Бэкапы не найдены.</b>\nИспользуйте команду <code>/backup</code> для создания архива.", nil
+	}
+
+	directURL := fmt.Sprintf("http://100.89.7.20:8080/files/backups/%s", latestName)
+	tsURL := fmt.Sprintf("https://vm-576151.tailb9b76e.ts.net:10443/files/backups/%s", latestName)
+
+	var sb strings.Builder
+	sb.WriteString("📦 <b>Последний системный бэкап:</b>\n\n")
+	sb.WriteString(fmt.Sprintf("├ <b>Файл:</b> <code>%s</code>\n", latestName))
+	sb.WriteString(fmt.Sprintf("├ <b>Размер:</b> <code>%s</code>\n", formatFileSize(latestSize)))
+	sb.WriteString(fmt.Sprintf("└ <b>Создан:</b> <code>%s</code>\n\n", latestMod.Format("02.01.2006 15:04:05")))
+	sb.WriteString("🔗 <b>Ссылки на скачивание (FileBrowser):</b>\n")
+	sb.WriteString(fmt.Sprintf("• <a href=\"%s\">Tailscale IP (100.89.7.20:8080)</a>\n", directURL))
+	sb.WriteString(fmt.Sprintf("• <a href=\"%s\">Tailscale HTTPS (MagicDNS)</a>\n\n", tsURL))
+	sb.WriteString("<i>Для создания свежего архива используйте кнопку ниже или команду /make_backup</i>")
+
+	return sb.String(), nil
+}
+
+// CreateBackup generates a new zip backup in /opt/filebrowser/backups.
+func (s *SysInfo) CreateBackup() (string, error) {
+	backupDir := "/opt/filebrowser/backups"
+	_ = os.MkdirAll(backupDir, 0755)
+
+	zipName := fmt.Sprintf("backup_%s.zip", time.Now().Format("2006-01-02"))
+	zipPath := filepath.Join(backupDir, zipName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "zip", "-r", zipPath,
+		"/root", "/opt", "/etc/systemd/system", "/etc/x-ui",
+		"-x", "*/node_modules/*", "*/logs/*", "*.log", "*/.git/*", "/root/.npm/*", "/root/.cache/*", "/opt/filebrowser/backups/*")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ошибка создания ZIP: %s (%w)", string(out), err)
+	}
+
+	info, err := os.Stat(zipPath)
+	if err != nil {
+		return "", fmt.Errorf("архив создан, но размер неизвестен: %w", err)
+	}
+
+	directURL := fmt.Sprintf("http://100.89.7.20:8080/files/backups/%s", zipName)
+	return fmt.Sprintf("✅ <b>Свежий бэкап успешно создан!</b>\n\n├ <b>Файл:</b> <code>%s</code>\n├ <b>Размер:</b> <code>%s</code>\n└ <b>Ссылка:</b> <a href=\"%s\">Скачать через FileBrowser</a>", zipName, formatFileSize(info.Size()), directURL), nil
 }

@@ -168,18 +168,24 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	case "📊 Статус", "📊 Сервер":
 		b.replyQuickStatus(msg.Chat.ID)
 		return
-	case "⚙️ Меню", "⚙️ Все функции":
-		b.sendMainMenu(msg.Chat.ID, "⚙️ <b>Главное меню SuperBot:</b>\nВыберите действие или категорию:")
-		return
 	case "⚡ Приоритеты", "⚡ Турбо Режим":
 		b.sendPriorityMenu(msg.Chat.ID)
 		return
-	case "🌐 Сеть & TS", "🌍 Сеть & TS", "🌐 Сеть":
+	case "🧹 Очистить RAM", "🧹 Очистить кэш", "🧹 Очистка":
+		b.replyDropCaches(msg.Chat.ID)
+		return
+	case "🌐 Сеть & VPN", "🌐 Сеть & TS", "🌍 Сеть & TS", "🌐 Сеть":
 		b.replyNetInfo(msg.Chat.ID)
+		return
+	case "📦 Бэкап", "📦 Бэкапы":
+		b.replyBackupInfo(msg.Chat.ID)
 		return
 	case "🔄 Новый диалог", "🔄 Новый диалог ИИ", "🔄 Сброс контекста":
 		b.setSession(userID, "")
 		b.sendText(msg.Chat.ID, "🔄 <b>Контекст очищен!</b>\nНачат новый диалог с Antigravity. Задайте любой вопрос или отправьте файл.")
+		return
+	case "⚙️ Меню", "⚙️ Все функции":
+		b.sendMainMenu(msg.Chat.ID, "⚙️ <b>Главное меню SuperBot:</b>\nВыберите действие или категорию:")
 		return
 	}
 
@@ -214,6 +220,32 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 		case "/drop_caches", "/clean":
 			b.replyDropCaches(msg.Chat.ID)
+
+		case "/backup":
+			b.replyBackupInfo(msg.Chat.ID)
+
+		case "/make_backup":
+			if b.checkAdmin(msg.Chat.ID, userID) {
+				b.replyCreateBackup(msg.Chat.ID)
+			}
+
+		case "/errors":
+			b.replyRecentErrors(msg.Chat.ID)
+
+		case "/turbo_ai":
+			if b.checkAdmin(msg.Chat.ID, userID) {
+				b.replyMode(msg.Chat.ID, cgroups.ModeAI)
+			}
+
+		case "/turbo_vpn":
+			if b.checkAdmin(msg.Chat.ID, userID) {
+				b.replyMode(msg.Chat.ID, cgroups.ModeVPN)
+			}
+
+		case "/balance":
+			if b.checkAdmin(msg.Chat.ID, userID) {
+				b.replyMode(msg.Chat.ID, cgroups.ModeBalanced)
+			}
 
 		case "/new", "/reset":
 			b.setSession(userID, "")
@@ -486,6 +518,20 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 	case "act_mail":
 		b.replyMail(chatID)
 
+	case "act_mail_ai":
+		b.handleAIQuery(chatID, userID, "Проанализируй мои последние входящие письма через /opt/superbot/check_mail.py --deep --limit 5: выдели самое важное, что требует внимания, дедлайны и интересные темы.")
+
+	case "act_backup_info":
+		b.replyBackupInfo(chatID)
+
+	case "act_create_backup":
+		if b.checkAdmin(chatID, userID) {
+			b.replyCreateBackup(chatID)
+		}
+
+	case "act_errors":
+		b.replyRecentErrors(chatID)
+
 	case "act_status":
 		b.replyQuickStatus(chatID)
 
@@ -586,12 +632,16 @@ func (b *Bot) getPersistentKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📬 Почта"),
 			tgbotapi.NewKeyboardButton("📊 Статус"),
-			tgbotapi.NewKeyboardButton("⚙️ Меню"),
+			tgbotapi.NewKeyboardButton("⚡ Приоритеты"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("⚡ Приоритеты"),
-			tgbotapi.NewKeyboardButton("🌐 Сеть & TS"),
+			tgbotapi.NewKeyboardButton("🧹 Очистить RAM"),
+			tgbotapi.NewKeyboardButton("🌐 Сеть & VPN"),
+			tgbotapi.NewKeyboardButton("📦 Бэкап"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🔄 Новый диалог"),
+			tgbotapi.NewKeyboardButton("⚙️ Меню"),
 		),
 	)
 	keyboard.ResizeKeyboard = true
@@ -661,14 +711,15 @@ func (b *Bot) showServerMenu(chatID int64, msgID int) {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔝 Топ процессов", "act_top"),
-			tgbotapi.NewInlineKeyboardButtonData("🔄 Рестарт OmniRoute", "act_restart_ai"),
+			tgbotapi.NewInlineKeyboardButtonData("⚠️ Лог ошибок", "act_errors"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад к категориям", "menu_all"),
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Рестарт OmniRoute", "act_restart_ai"),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад", "menu_all"),
 		),
 	)
 
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, "🖥 <b>Управление сервером и памятью:</b>\nВсе функции выполняются мгновенно за 0.1 сек:")
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, "🖥 <b>Управление сервером и памятью:</b>\nВсе функции выполняются мгновенно за 0.05 сек:")
 	edit.ParseMode = "HTML"
 	edit.ReplyMarkup = &markup
 	_, _ = b.api.Send(edit)
@@ -698,16 +749,19 @@ func (b *Bot) showFilesMenu(chatID int64, msgID int) {
 	fileBrowserURL := "https://vm-576151.tailb9b76e.ts.net:10443"
 	markup := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📦 Бэкап наработок", "act_backup_info"),
 			tgbotapi.NewInlineKeyboardButtonData("📂 Список /root", "act_ls_root"),
-			tgbotapi.NewInlineKeyboardButtonData("📥 Запросить файл", "act_prompt_file"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📥 Запросить файл", "act_prompt_file"),
 			tgbotapi.NewInlineKeyboardButtonURL("🔗 FileBrowser Web", fileBrowserURL),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад к категориям", "menu_all"),
 		),
 	)
 
-	edit := tgbotapi.NewEditMessageText(chatID, msgID, "📁 <b>Файловый менеджер:</b>\nПросматривайте файлы, скачивайте ZIP-архивы или откройте веб-интерфейс FileBrowser:")
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, "📁 <b>Файловый менеджер & Бэкапы:</b>\nСкачивайте бэкапы, просматривайте файлы или откройте веб-интерфейс FileBrowser:")
 	edit.ParseMode = "HTML"
 	edit.ReplyMarkup = &markup
 	_, _ = b.api.Send(edit)
@@ -833,7 +887,63 @@ func (b *Bot) replyMail(chatID int64) {
 		return
 	}
 
+	mailMarkup := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", "act_mail"),
+			tgbotapi.NewInlineKeyboardButtonData("🧠 Анализ входящих (ИИ)", "act_mail_ai"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
+		),
+	)
+
+	b.sendHTMLChunked(chatID, out, &mailMarkup)
+}
+
+func (b *Bot) replyBackupInfo(chatID int64) {
+	out, err := b.sys.GetBackupInfo()
+	if err != nil {
+		b.sendText(chatID, fmt.Sprintf("❌ Ошибка бэкапа: %s", html.EscapeString(err.Error())))
+		return
+	}
+
+	markup := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Создать свежий бэкап", "act_create_backup"),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(chatID, out)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = markup
+	_, _ = b.api.Send(msg)
+}
+
+func (b *Bot) replyCreateBackup(chatID int64) {
+	_ = b.sendTyping(chatID)
+	waitMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "📦 <i>Создаю полный ZIP-архив наработок... (это займет 5-10 сек)</i>"))
+
+	out, err := b.sys.CreateBackup()
+	if waitMsg.MessageID > 0 {
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, waitMsg.MessageID))
+	}
+
+	if err != nil {
+		b.sendText(chatID, fmt.Sprintf("❌ Ошибка создания бэкапа: %s", html.EscapeString(err.Error())))
+		return
+	}
+
 	b.sendTextWithMenu(chatID, out)
+}
+
+func (b *Bot) replyRecentErrors(chatID int64) {
+	out, err := b.sys.GetRecentErrors()
+	if err != nil {
+		b.sendText(chatID, fmt.Sprintf("❌ Ошибка чтения журнала: %s", html.EscapeString(err.Error())))
+		return
+	}
+	b.sendText(chatID, out)
 }
 
 func (b *Bot) replyStats(chatID int64) {
