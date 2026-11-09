@@ -263,8 +263,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Plain text: forward to Antigravity AI Brain
-	b.handleAIQuery(msg.Chat.ID, text)
+	// Plain text: instantly reply with confirmation and run AI query asynchronously in goroutine
+	b.sendText(msg.Chat.ID, "🤔 <i>Запрос передан в Antigravity. Думаю...</i>")
+	go b.handleAIQuery(msg.Chat.ID, text)
 }
 
 func (b *Bot) checkAdmin(chatID, userID int64) bool {
@@ -439,39 +440,55 @@ func (b *Bot) replyAIRestart(chatID int64) {
 }
 
 func (b *Bot) handleAIQuery(chatID int64, prompt string) {
-	_, _ = b.api.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
-
-	waitMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, "🤔 <i>Запрос передан в Antigravity. Думаю...</i>"))
-	waitMsgID := 0
-	if err == nil {
-		waitMsgID = waitMsg.MessageID
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
+	// Periodically send typing action so Telegram shows the bot is working
+	ticker := time.NewTicker(4 * time.Second)
+	defer ticker.Stop()
+	stopTyping := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stopTyping:
+				return
+			case <-ticker.C:
+				_, _ = b.api.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+			}
+		}
+	}()
+
 	reply, err := b.aiCli.Ask(ctx, prompt)
+	close(stopTyping)
+
 	if err != nil {
 		errMsg := fmt.Sprintf("⚠️ <b>Antigravity Bridge:</b>\n%s", err.Error())
-		if waitMsgID > 0 {
-			edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, errMsg)
-			edit.ParseMode = "HTML"
-			_, _ = b.api.Send(edit)
-		} else {
-			b.sendText(chatID, errMsg)
-		}
+		b.sendText(chatID, errMsg)
 		return
 	}
 
-	if waitMsgID > 0 && len(reply) < 4000 {
-		edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, reply)
-		edit.ParseMode = "HTML"
-		if _, err := b.api.Send(edit); err != nil {
-			edit.ParseMode = ""
-			_, _ = b.api.Send(edit)
+	// Send final response as a separate new message
+	b.sendLongText(chatID, reply)
+}
+
+func (b *Bot) sendLongText(chatID int64, text string) {
+	const maxChunk = 4000
+	if len(text) <= maxChunk {
+		b.sendText(chatID, text)
+		return
+	}
+
+	for len(text) > 0 {
+		chunkSize := len(text)
+		if chunkSize > maxChunk {
+			chunkSize = maxChunk
+			if lastNL := strings.LastIndex(text[:chunkSize], "\n"); lastNL > 2000 {
+				chunkSize = lastNL
+			}
 		}
-	} else {
-		b.sendText(chatID, reply)
+		chunk := text[:chunkSize]
+		text = strings.TrimLeft(text[chunkSize:], "\n")
+		b.sendText(chatID, chunk)
 	}
 }
 

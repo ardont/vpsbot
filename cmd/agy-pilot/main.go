@@ -62,8 +62,8 @@ func main() {
 	server := &http.Server{
 		Addr:         "127.0.0.1:" + port,
 		Handler:      mux,
-		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		ReadTimeout:  300 * time.Second,
+		WriteTimeout: 300 * time.Second,
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -213,7 +213,7 @@ func queryAntigravity(ctx context.Context, prompt string) (string, error) {
 
 	transcriptPath := filepath.Join("/root/.gemini/antigravity/brain", convID, ".system_generated/logs/transcript.jsonl")
 
-	deadline := time.Now().Add(45 * time.Second)
+	deadline := time.Now().Add(300 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 

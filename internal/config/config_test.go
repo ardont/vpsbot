@@ -37,9 +37,11 @@ func TestConfigLoad_Success(t *testing.T) {
 }
 
 func TestConfigLoad_MissingToken(t *testing.T) {
+	_ = os.Setenv("SUPERBOT_SKIP_OPT_ENV", "true")
 	_ = os.Unsetenv("TG_BOT_TOKEN")
 	_ = os.Setenv("TG_ADMIN_ID", "5342950903")
 	defer func() {
+		_ = os.Unsetenv("SUPERBOT_SKIP_OPT_ENV")
 		_ = os.Unsetenv("TG_ADMIN_ID")
 	}()
 

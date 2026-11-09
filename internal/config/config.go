@@ -23,9 +23,11 @@ type Config struct {
 
 // Load loads settings from .env and environment variables.
 func Load() (*Config, error) {
-	// Try loading from current dir, then standard /opt/superbot/.env
+	// Try loading from current dir, then standard /opt/superbot/.env (unless explicitly skipped in tests)
 	_ = godotenv.Load(".env")
-	_ = godotenv.Load("/opt/superbot/.env")
+	if os.Getenv("SUPERBOT_SKIP_OPT_ENV") != "true" {
+		_ = godotenv.Load("/opt/superbot/.env")
+	}
 
 	token := strings.TrimSpace(os.Getenv("TG_BOT_TOKEN"))
 	if token == "" {
@@ -44,7 +46,7 @@ func Load() (*Config, error) {
 
 	antigravityURL := strings.TrimSpace(os.Getenv("ANTIGRAVITY_API_URL"))
 	if antigravityURL == "" {
-		antigravityURL = "http://localhost:43427"
+		antigravityURL = "http://localhost:43430"
 	}
 
 	localPort := strings.TrimSpace(os.Getenv("LOCAL_API_PORT"))

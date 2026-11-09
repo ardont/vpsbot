@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// SystemDirective instructs the AI model to reply immediately with direct text
+// and refrain from invoking interactive prompt tools like ask_question.
+const SystemDirective = "Отвечай сразу готовым текстом. Не используй инструменты, требующие клика мышкой (ask_question). Выдавай прямой результат."
+
 // Client handles communication with Antigravity / agy-pilot bridge.
 type Client struct {
 	apiURL     string
@@ -20,12 +24,12 @@ type Client struct {
 // NewClient creates a new Antigravity API client.
 func NewClient(apiURL string) *Client {
 	if apiURL == "" {
-		apiURL = "http://localhost:43427"
+		apiURL = "http://localhost:43430"
 	}
 	return &Client{
 		apiURL: strings.TrimRight(apiURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 90 * time.Second, // Allow deep agent reasoning
+			Timeout: 300 * time.Second, // 5 minutes timeout for deep agent reasoning & long tasks
 		},
 	}
 }
@@ -44,15 +48,21 @@ type queryResponse struct {
 
 // Ask sends a user question to Antigravity and returns the response.
 func (c *Client) Ask(ctx context.Context, prompt string) (string, error) {
+	// Prepend system directive to prevent interactive widgets (ask_question)
+	fullPrompt := prompt
+	if !strings.Contains(prompt, SystemDirective) {
+		fullPrompt = fmt.Sprintf("[%s]\n\n%s", SystemDirective, prompt)
+	}
+
 	reqBody, err := json.Marshal(queryRequest{
-		Prompt: prompt,
-		Query:  prompt,
+		Prompt: fullPrompt,
+		Query:  fullPrompt,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to encode request: %w", err)
 	}
 
-	endpoints := []string{"/api/ask", "/prompt", "/v1/chat/completions", "/query"}
+	endpoints := []string{"/query", "/api/ask", "/prompt", "/v1/chat/completions"}
 	var lastErr error
 
 	for _, ep := range endpoints {
@@ -95,7 +105,7 @@ func (c *Client) Ask(ctx context.Context, prompt string) (string, error) {
 	}
 
 	if lastErr != nil {
-		return "", fmt.Errorf("мост Antigravity (%s) недоступен: %w\nУбедитесь, что agy-pilot или агент запущены на порту :43427", c.apiURL, lastErr)
+		return "", fmt.Errorf("мост Antigravity (%s) недоступен: %w\nУбедитесь, что agy-pilot или агент запущены на порту %s", c.apiURL, lastErr, c.apiURL)
 	}
 
 	return "", fmt.Errorf("не удалось получить ответ от Antigravity на %s", c.apiURL)
