@@ -42,6 +42,7 @@ type AgentAPINewConvOutput struct {
 			Prompt         string `json:"prompt"`
 		} `json:"newConversation"`
 	} `json:"response"`
+	Error string `json:"error,omitempty"`
 }
 
 type ToolCallItem struct {
@@ -229,11 +230,20 @@ func discoverHub() (string, string) {
 	lines := strings.Split(string(out), "\n")
 	for _, l := range lines {
 		if strings.Contains(l, "/agy") && strings.Contains(l, "--hub") {
+			var curToken, curPort string
 			if m := csrfRe.FindStringSubmatch(l); len(m) > 1 {
-				token = m[1]
+				curToken = m[1]
 			}
 			if m := portRe.FindStringSubmatch(l); len(m) > 1 {
-				port = m[1]
+				curPort = m[1]
+			}
+			if curPort != "" && curToken != "" {
+				// Prioritize the IDE session hub which includes --add-dir
+				if strings.Contains(l, "--add-dir") {
+					return "127.0.0.1:" + curPort, curToken
+				}
+				port = curPort
+				token = curToken
 			}
 		}
 	}
@@ -295,7 +305,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 	if !canReuse {
 		// Start a fresh conversation
 		log.Printf("[agy-pilot] Creating new Antigravity session...")
-		cmd := exec.CommandContext(ctx, agyBin, "agentapi", "new-conversation", "--model=flash", prompt)
+		cmd := exec.CommandContext(ctx, agyBin, "agentapi", "new-conversation", prompt)
 		cmd.Dir = "/root"
 		cmd.Env = cleanEnv
 		var stdout, stderr bytes.Buffer
@@ -303,12 +313,19 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			return nil, fmt.Errorf("failed to run agy new-conversation: %w (stderr: %s)", err, stderr.String())
+			errDetail := strings.TrimSpace(stderr.String())
+			if errDetail == "" {
+				errDetail = strings.TrimSpace(stdout.String())
+			}
+			return nil, fmt.Errorf("failed to run agy new-conversation: %w (details: %s)", err, errDetail)
 		}
 
 		var output AgentAPINewConvOutput
 		if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
-			return nil, fmt.Errorf("failed to parse agentapi output: %w", err)
+			return nil, fmt.Errorf("failed to parse agentapi output: %w (stdout: %s)", err, stdout.String())
+		}
+		if output.Error != "" {
+			return nil, fmt.Errorf("agentapi returned error: %s", output.Error)
 		}
 
 		convID = output.Response.NewConversation.ConversationID
