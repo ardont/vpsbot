@@ -49,3 +49,32 @@ func TestPrepareFileForSending(t *testing.T) {
 		t.Errorf("Expected path=/etc/os-release, got %s", path)
 	}
 }
+
+func TestAdvancedMarkdownFormatting(t *testing.T) {
+	input := `### Заголовок
+Ссылка с кириллицей: [Яндекс](https://market.yandex.ru/search?text=ноутбук+Acer).
+Ссылка с подчеркиваниями: [Подчеркивания](https://example.com/test_url_with_underscores).
+Сравнение: 5 < 10 и Q&A сессия.
+*Курсив* и **Жирный** и ` + "`код`" + `.
+`
+	res := ConvertMarkdownToTelegramHTML(input)
+
+	// Check that cyrillic URL is percent-encoded
+	if !strings.Contains(res.HTMLText, "%D0%BD%D0%BE%D1%83%D1%82%D0%B1%D1%83%D0%BA") {
+		t.Errorf("Expected percent-encoded URL, got: %s", res.HTMLText)
+	}
+	// Check that underscore URL did not get <i> inside href
+	if strings.Contains(res.HTMLText, "<i>") && strings.Contains(res.HTMLText, "<a href=") {
+		if strings.Contains(res.HTMLText, "<a href=\"https://example.com/test<i>") {
+			t.Errorf("URL was mangled by italic regex: %s", res.HTMLText)
+		}
+	}
+	// Check that & got escaped
+	if !strings.Contains(res.HTMLText, "Q&amp;A") {
+		t.Errorf("Expected Q&amp;A, got: %s", res.HTMLText)
+	}
+	// Check that < got escaped
+	if !strings.Contains(res.HTMLText, "5 &lt; 10") {
+		t.Errorf("Expected 5 &lt; 10, got: %s", res.HTMLText)
+	}
+}

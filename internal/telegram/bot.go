@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1807,6 +1808,12 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 		return true
 	}
 
+	stripHTML := func(s string) string {
+		tagRe := regexp.MustCompile(`<[^>]*>`)
+		clean := tagRe.ReplaceAllString(s, "")
+		return html.UnescapeString(clean)
+	}
+
 	if len(text) <= maxChunk {
 		msg := tgbotapi.NewMessage(chatID, text)
 		msg.ParseMode = "HTML"
@@ -1817,7 +1824,9 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 			msg.ReplyMarkup = kb
 		}
 		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("[Telegram] Send HTML failed (%v), falling back to clean plain text", err)
 			msg.ParseMode = ""
+			msg.Text = stripHTML(text)
 			_, _ = b.api.Send(msg)
 		}
 		return
@@ -1832,7 +1841,9 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 			msg := tgbotapi.NewMessage(chatID, chunkText)
 			msg.ParseMode = "HTML"
 			if _, err := b.api.Send(msg); err != nil {
+				log.Printf("[Telegram] Send HTML chunk failed (%v), falling back to clean plain text", err)
 				msg.ParseMode = ""
+				msg.Text = stripHTML(chunkText)
 				_, _ = b.api.Send(msg)
 			}
 			currentChunk.Reset()
@@ -1841,7 +1852,8 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 	}
 
 	if currentChunk.Len() > 0 {
-		msg := tgbotapi.NewMessage(chatID, currentChunk.String())
+		finalChunk := currentChunk.String()
+		msg := tgbotapi.NewMessage(chatID, finalChunk)
 		msg.ParseMode = "HTML"
 		if markup != nil {
 			msg.ReplyMarkup = markup
@@ -1850,7 +1862,9 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 			msg.ReplyMarkup = kb
 		}
 		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("[Telegram] Send HTML final chunk failed (%v), falling back to clean plain text", err)
 			msg.ParseMode = ""
+			msg.Text = stripHTML(finalChunk)
 			_, _ = b.api.Send(msg)
 		}
 	}
