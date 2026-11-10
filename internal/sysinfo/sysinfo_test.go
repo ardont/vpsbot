@@ -3,6 +3,7 @@ package sysinfo_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"vpsbot/internal/sysinfo"
 )
@@ -65,6 +66,13 @@ func TestSysInfo_GetStats(t *testing.T) {
 	}
 	if len(stats) == 0 {
 		t.Error("expected non-empty stats output")
+	}
+	t.Logf("\n%s", stats)
+	if !strings.Contains(stats, "CPU Load:") {
+		t.Error("expected stats to contain 'CPU Load:'")
+	}
+	if !strings.Contains(stats, "▰") && !strings.Contains(stats, "▱") {
+		t.Error("expected stats to contain progress bar characters")
 	}
 }
 

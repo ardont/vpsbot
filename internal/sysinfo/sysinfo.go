@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ func (s *SysInfo) GetStats() (string, error) {
 // GetQuickStatus returns lightning-fast (0.05s) system health metrics with visual progress bars.
 func (s *SysInfo) GetQuickStatus() (string, error) {
 	var sb strings.Builder
-	sb.WriteString("🖥 <b>Статус сервера</b> <code>[Debian • 1 vCPU • 2 GB]</code>\n\n")
+	sb.WriteString(fmt.Sprintf("🖥 <b>Статус сервера</b> <code>[Debian • %d vCPU • 2 GB]</code>\n\n", runtime.NumCPU()))
 
 	// Host Uptime
 	hInfo, err := host.Info()
@@ -82,7 +83,17 @@ func (s *SysInfo) GetQuickStatus() (string, error) {
 	// Load Average
 	lAvg, err := load.Avg()
 	if err == nil {
-		sb.WriteString(fmt.Sprintf("⚡ <b>CPU Load:</b> <code>%.2f, %.2f, %.2f</code>\n\n", lAvg.Load1, lAvg.Load5, lAvg.Load15))
+		numCPU := runtime.NumCPU()
+		if numCPU < 1 {
+			numCPU = 1
+		}
+		cpuPercent := (lAvg.Load1 / float64(numCPU)) * 100.0
+		if cpuPercent < 0 {
+			cpuPercent = 0
+		}
+		bar := renderProgressBar(cpuPercent, 10)
+		sb.WriteString(fmt.Sprintf("⚡ <b>CPU Load:</b> <code>%.2f, %.2f, %.2f</code>\n<code>%s</code> <b>%.1f%%</b>\n\n",
+			lAvg.Load1, lAvg.Load5, lAvg.Load15, bar, cpuPercent))
 	} else {
 		sb.WriteString("\n")
 	}
