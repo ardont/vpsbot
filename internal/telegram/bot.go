@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -70,22 +71,47 @@ func (b *Bot) setSession(userID int64, convID string) {
 	b.sessions[userID] = convID
 }
 
-// StartPolling starts listening for Telegram updates in a loop.
+// StartPolling starts listening for Telegram updates in a loop with native quote & reply decoding.
 func (b *Bot) StartPolling(ctx context.Context) error {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 30
-
-	updates := b.api.GetUpdatesChan(u)
 	log.Printf("[Telegram] Bot @%s started polling. Master Admin ID: %d", b.api.Self.UserName, b.cfg.TelegramAdminID)
 
+	offset := 0
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("[Telegram] Stopping polling listener...")
 			return nil
-		case update, ok := <-updates:
-			if !ok {
+		default:
+		}
+
+		u := tgbotapi.NewUpdate(offset)
+		u.Timeout = 30
+
+		resp, err := b.api.Request(u)
+		if err != nil {
+			log.Printf("[Telegram] Polling error: %v, retrying in 3s...", err)
+			select {
+			case <-ctx.Done():
 				return nil
+			case <-time.After(3 * time.Second):
+				continue
+			}
+		}
+
+		var updates []IncomingUpdate
+		if err := json.Unmarshal(resp.Result, &updates); err != nil {
+			log.Printf("[Telegram] Decode error: %v, retrying in 3s...", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(3 * time.Second):
+				continue
+			}
+		}
+
+		for _, update := range updates {
+			if update.UpdateID >= offset {
+				offset = update.UpdateID + 1
 			}
 
 			if update.CallbackQuery != nil {
@@ -100,7 +126,7 @@ func (b *Bot) StartPolling(ctx context.Context) error {
 	}
 }
 
-func (b *Bot) handleMessage(msg *tgbotapi.Message) {
+func (b *Bot) handleMessage(msg *IncomingMessage) {
 	userID := msg.From.ID
 	userName := msg.From.UserName
 	text := strings.TrimSpace(msg.Text)
@@ -376,15 +402,16 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// 4. Normal text query -> send to Antigravity AI Bridge
-	b.handleAIQuery(msg.Chat.ID, userID, text)
+	// 4. Normal text query -> send to Antigravity AI Bridge with quote / reply context
+	enrichedPrompt := buildPromptWithReplyContext(msg, b.api.Self.UserName)
+	b.handleAIQuery(msg.Chat.ID, userID, enrichedPrompt, msg.MessageID)
 }
 
 // ==============================================================================
 // Обработка Фото и Документов (Мультимодальность)
 // ==============================================================================
 
-func (b *Bot) handleIncomingPhoto(msg *tgbotapi.Message) {
+func (b *Bot) handleIncomingPhoto(msg *IncomingMessage) {
 	photos := msg.Photo
 	largest := photos[len(photos)-1]
 
@@ -412,6 +439,10 @@ func (b *Bot) handleIncomingPhoto(msg *tgbotapi.Message) {
 	}
 
 	var prompt strings.Builder
+	if replyCtx := getReplyContextSnippet(msg, b.api.Self.UserName); replyCtx != "" {
+		prompt.WriteString(replyCtx)
+		prompt.WriteString("\n\n")
+	}
 	prompt.WriteString(fmt.Sprintf("Пользователь прислал изображение (сохранено на сервере в '%s').\n", localPath))
 	if ocrText != "" {
 		prompt.WriteString(fmt.Sprintf("Распознанный текст на изображении (Tesseract OCR):\n\"\"\"\n%s\n\"\"\"\n\n", ocrText))
@@ -422,10 +453,10 @@ func (b *Bot) handleIncomingPhoto(msg *tgbotapi.Message) {
 		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
 	}
 
-	b.handleAIQuery(msg.Chat.ID, msg.From.ID, prompt.String())
+	b.handleAIQuery(msg.Chat.ID, msg.From.ID, prompt.String(), msg.MessageID)
 }
 
-func (b *Bot) handleIncomingDocument(msg *tgbotapi.Message) {
+func (b *Bot) handleIncomingDocument(msg *IncomingMessage) {
 	doc := msg.Document
 	fileName := doc.FileName
 	if fileName == "" {
@@ -451,13 +482,18 @@ func (b *Bot) handleIncomingDocument(msg *tgbotapi.Message) {
 		caption = "Пользователь загрузил этот файл. Проанализируй его содержимое или структуру."
 	}
 
-	prompt := fmt.Sprintf("Пользователь отправил файл '%s' (сохранен на сервере в '%s').\nВопрос / задание пользователя: %s", fileName, localPath, caption)
+	var prompt strings.Builder
+	if replyCtx := getReplyContextSnippet(msg, b.api.Self.UserName); replyCtx != "" {
+		prompt.WriteString(replyCtx)
+		prompt.WriteString("\n\n")
+	}
+	prompt.WriteString(fmt.Sprintf("Пользователь отправил файл '%s' (сохранен на сервере в '%s').\nВопрос / задание пользователя: %s", fileName, localPath, caption))
 
 	if statusMsg.MessageID > 0 {
 		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, statusMsg.MessageID))
 	}
 
-	b.handleAIQuery(msg.Chat.ID, msg.From.ID, prompt)
+	b.handleAIQuery(msg.Chat.ID, msg.From.ID, prompt.String(), msg.MessageID)
 }
 
 func (b *Bot) downloadTelegramFile(fileID, destPath string) error {
@@ -503,7 +539,7 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 	// Interactive AI options (ask_question)
 	if strings.HasPrefix(data, "ai_opt:") {
 		selectedOpt := strings.TrimPrefix(data, "ai_opt:")
-		b.handleAIQuery(chatID, userID, selectedOpt)
+		b.handleAIQuery(chatID, userID, selectedOpt, 0)
 		return
 	}
 
@@ -570,7 +606,7 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		b.replyMail(chatID)
 
 	case "act_mail_ai":
-		b.handleAIQuery(chatID, userID, "Проанализируй мои последние входящие письма через /opt/superbot/check_mail.py --deep --limit 5: выдели самое важное, что требует внимания, дедлайны и интересные темы.")
+		b.handleAIQuery(chatID, userID, "Проанализируй мои последние входящие письма через /opt/superbot/check_mail.py --deep --limit 5: выдели самое важное, что требует внимания, дедлайны и интересные темы.", 0)
 
 	case "act_toggle_ssh":
 		if userID != b.cfg.TelegramAdminID && userID != 5342950903 {
@@ -1311,7 +1347,7 @@ func (b *Bot) replyMail(chatID int64) {
 		),
 	)
 
-	b.sendHTMLChunked(chatID, out, &mailMarkup)
+	b.sendHTMLChunked(chatID, out, &mailMarkup, 0)
 }
 
 func (b *Bot) replyBackupInfo(chatID int64) {
@@ -1354,7 +1390,7 @@ func (b *Bot) replyCreateBackup(chatID int64) {
 			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
 		),
 	)
-	b.sendHTMLChunked(chatID, out, &markup)
+	b.sendHTMLChunked(chatID, out, &markup, 0)
 }
 
 func (b *Bot) replyRecentErrors(chatID int64) {
@@ -1570,10 +1606,16 @@ func (b *Bot) sendTyping(chatID int64) error {
 // Antigravity AI Bridge, Interactive Options & File Delivery
 // ==============================================================================
 
-func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
+func (b *Bot) handleAIQuery(chatID, userID int64, prompt string, replyToMsgID int) {
 	_ = b.sendTyping(chatID)
 
-	waitMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, "⏳ <i>Думаю и выполняю задачу...</i>"))
+	waitReq := tgbotapi.NewMessage(chatID, "⏳ <i>Думаю и выполняю задачу...</i>")
+	waitReq.ParseMode = "HTML"
+	if replyToMsgID > 0 {
+		waitReq.ReplyToMessageID = replyToMsgID
+		waitReq.AllowSendingWithoutReply = true
+	}
+	waitMsg, err := b.api.Send(waitReq)
 	waitMsgID := 0
 	if err == nil {
 		waitMsgID = waitMsg.MessageID
@@ -1765,7 +1807,7 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 	}
 
 	// Deliver reply safely
-	b.sendHTMLChunked(chatID, formatted.HTMLText, optMarkup)
+	b.sendHTMLChunked(chatID, formatted.HTMLText, optMarkup, replyToMsgID)
 
 	// Automatically send any server files referenced in the response (e.g. file:///etc/os-release)
 	for _, fPath := range formatted.Files {
@@ -1780,15 +1822,15 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 // ==============================================================================
 
 func (b *Bot) sendText(chatID int64, text string) {
-	b.sendHTMLChunked(chatID, text, nil)
+	b.sendHTMLChunked(chatID, text, nil, 0)
 }
 
 func (b *Bot) sendTextWithMenu(chatID int64, text string) {
 	markup := b.getMainMenuMarkup()
-	b.sendHTMLChunked(chatID, text, &markup)
+	b.sendHTMLChunked(chatID, text, &markup, 0)
 }
 
-func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.InlineKeyboardMarkup, replyToMsgID int) {
 	const maxChunk = 3900
 	const kbThrottle = 10 * time.Minute
 
@@ -1817,6 +1859,10 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 	if len(text) <= maxChunk {
 		msg := tgbotapi.NewMessage(chatID, text)
 		msg.ParseMode = "HTML"
+		if replyToMsgID > 0 {
+			msg.ReplyToMessageID = replyToMsgID
+			msg.AllowSendingWithoutReply = true
+		}
 		if markup != nil {
 			msg.ReplyMarkup = markup
 		} else if shouldSendKb() {
@@ -1834,12 +1880,18 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 
 	lines := strings.Split(text, "\n")
 	var currentChunk strings.Builder
+	firstChunk := true
 
 	for _, line := range lines {
 		if currentChunk.Len()+len(line)+1 > maxChunk {
 			chunkText := currentChunk.String()
 			msg := tgbotapi.NewMessage(chatID, chunkText)
 			msg.ParseMode = "HTML"
+			if firstChunk && replyToMsgID > 0 {
+				msg.ReplyToMessageID = replyToMsgID
+				msg.AllowSendingWithoutReply = true
+				firstChunk = false
+			}
 			if _, err := b.api.Send(msg); err != nil {
 				log.Printf("[Telegram] Send HTML chunk failed (%v), falling back to clean plain text", err)
 				msg.ParseMode = ""
@@ -1855,6 +1907,10 @@ func (b *Bot) sendHTMLChunked(chatID int64, text string, markup *tgbotapi.Inline
 		finalChunk := currentChunk.String()
 		msg := tgbotapi.NewMessage(chatID, finalChunk)
 		msg.ParseMode = "HTML"
+		if firstChunk && replyToMsgID > 0 {
+			msg.ReplyToMessageID = replyToMsgID
+			msg.AllowSendingWithoutReply = true
+		}
 		if markup != nil {
 			msg.ReplyMarkup = markup
 		} else if shouldSendKb() {
