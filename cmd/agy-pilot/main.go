@@ -355,7 +355,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 	inactivityTimeout := 300 * time.Second
 	lastActivity := time.Now()
 	var lastFileSize int64 = initialOffset
-	lastReportedStep := -1
+	reportedEvents := make(map[string]bool)
 
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -391,10 +391,11 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 				continue
 			}
 
-			// Report intermediate tool progress to streaming client
+			// Report intermediate tool progress to streaming client (deduplicated by step & output state)
 			for _, ev := range events {
-				if ev.StepIndex > lastReportedStep || (ev.StepIndex == lastReportedStep && ev.Output != "") {
-					lastReportedStep = ev.StepIndex
+				key := fmt.Sprintf("%d:%s:%t", ev.StepIndex, ev.Summary, ev.Output != "")
+				if !reportedEvents[key] {
+					reportedEvents[key] = true
 					if onProgress != nil && ev.Summary != "" {
 						onProgress(StreamEvent{
 							Type:           "progress",

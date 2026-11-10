@@ -3,29 +3,47 @@ package formatter
 import (
 	"fmt"
 	"html"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var (
-	codeBlockRe = regexp.MustCompile("(?s)```([a-zA-Z0-9_-]*)\\r?\\n(.*?)```")
+	codeBlockRe  = regexp.MustCompile("(?s)```([a-zA-Z0-9_-]*)\\r?\\n(.*?)```")
 	inlineCodeRe = regexp.MustCompile("`([^`\\n]+)`")
-	mdLinkRe    = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\)]+)\)`)
-	fileLinkRe  = regexp.MustCompile(`\[([^\]]+)\]\(file://([^\)]+)\)`)
-	rawFileRe   = regexp.MustCompile(`file://([^\s\)\],]+)`)
-	boldRe1     = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	boldRe2     = regexp.MustCompile(`__([^_]+)__`)
-	italicRe1   = regexp.MustCompile(`\*([^*\n]+)\*`)
-	italicRe2   = regexp.MustCompile(`_([^_\n]+)_`)
-	strikeRe    = regexp.MustCompile(`~~([^~]+)~~`)
-	headerRe    = regexp.MustCompile(`(?m)^#{1,4}\s+(.+)$`)
-	hrRe        = regexp.MustCompile(`(?m)^[-*_]{3,}\s*$`)
-	bulletRe    = regexp.MustCompile(`(?m)^[ \t]*[-*+][ \t]+`)
-	quoteRe     = regexp.MustCompile(`(?m)^>[ \t]*(.+)$`)
+	mdLinkRe     = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\)]+)\)`)
+	fileLinkRe   = regexp.MustCompile(`\[([^\]]+)\]\(file://([^\)]+)\)`)
+	rawFileRe    = regexp.MustCompile(`file://([^\s\)\],]+)`)
+	boldRe1      = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	boldRe2      = regexp.MustCompile(`__([^_]+)__`)
+	italicRe1    = regexp.MustCompile(`\*([^*\n]+)\*`)
+	italicRe2    = regexp.MustCompile(`_([^_\n]+)_`)
+	strikeRe     = regexp.MustCompile(`~~([^~]+)~~`)
+	headerRe     = regexp.MustCompile(`(?m)^#{1,4}\s+(.+)$`)
+	hrRe         = regexp.MustCompile(`(?m)^[-*_]{3,}\s*$`)
+	bulletRe     = regexp.MustCompile(`(?m)^[ \t]*[-*+][ \t]+`)
+	quoteRe      = regexp.MustCompile(`(?m)^>[ \t]*(.+)$`)
+	allowedTags  = regexp.MustCompile(`^</?(b|i|u|s|code|pre|blockquote|a|tg-spoiler)\b[^>]*>`)
+	entityOrAmpRe = regexp.MustCompile(`&([a-zA-Z0-9]+|#\d+|#x[0-9a-fA-F]+);|&`)
 )
+
+// sanitizeTelegramURL safely percent-encodes non-ASCII characters and spaces in URLs.
+func sanitizeTelegramURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	var b strings.Builder
+	for _, r := range raw {
+		if r > unicode.MaxASCII || r == ' ' {
+			b.WriteString(url.QueryEscape(string(r)))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return html.EscapeString(b.String())
+}
 
 // Result holds the formatted HTML text and any detected server file attachments.
 type Result struct {
@@ -83,7 +101,7 @@ func ConvertMarkdownToTelegramHTML(md string) Result {
 			label := sub[1]
 			path := sub[2]
 			addFile(path)
-			return fmt.Sprintf("<b>📄 %s</b> (<code>%s</code>)", html.EscapeString(label), html.EscapeString(path))
+			return addPlaceholder(fmt.Sprintf("<b>📄 %s</b> (<code>%s</code>)", html.EscapeString(label), html.EscapeString(path)))
 		}
 		return match
 	})
@@ -93,46 +111,62 @@ func ConvertMarkdownToTelegramHTML(md string) Result {
 		if len(sub) > 1 {
 			path := sub[1]
 			addFile(path)
-			return fmt.Sprintf("<code>%s</code>", html.EscapeString(path))
+			return addPlaceholder(fmt.Sprintf("<code>%s</code>", html.EscapeString(path)))
 		}
 		return match
 	})
 
-	// 4. Web links
+	// 4. Web links (with placeholder and URL sanitization so bold/italic regexes won't mangle them)
 	text = mdLinkRe.ReplaceAllStringFunc(text, func(match string) string {
 		sub := mdLinkRe.FindStringSubmatch(match)
 		if len(sub) > 2 {
 			label := html.EscapeString(sub[1])
-			url := html.EscapeString(sub[2])
-			return fmt.Sprintf("<a href=\"%s\">%s</a>", url, label)
+			safeURL := sanitizeTelegramURL(sub[2])
+			return addPlaceholder(fmt.Sprintf("<a href=\"%s\">%s</a>", safeURL, label))
 		}
 		return match
 	})
 
-	// 5. Headers
+	// 5. Escape bare & if not part of an entity
+	text = entityOrAmpRe.ReplaceAllStringFunc(text, func(m string) string {
+		if m == "&" {
+			return "&amp;"
+		}
+		return m
+	})
+
+	// 6. Escape stray < that is not an allowed Telegram HTML tag
+	text = regexp.MustCompile(`<[^>]*>|<`).ReplaceAllStringFunc(text, func(match string) string {
+		if allowedTags.MatchString(match) {
+			return match
+		}
+		return strings.ReplaceAll(match, "<", "&lt;")
+	})
+
+	// 7. Headers
 	text = headerRe.ReplaceAllString(text, "<b>$1</b>")
 
-	// 6. Horizontal Rules
+	// 8. Horizontal Rules
 	text = hrRe.ReplaceAllString(text, "──────────────")
 
-	// 7. Bullets
+	// 9. Bullets
 	text = bulletRe.ReplaceAllString(text, "• ")
 
-	// 8. Quotes
+	// 10. Quotes
 	text = quoteRe.ReplaceAllString(text, "<blockquote>$1</blockquote>")
 
-	// 9. Bold
+	// 11. Bold
 	text = boldRe1.ReplaceAllString(text, "<b>$1</b>")
 	text = boldRe2.ReplaceAllString(text, "<b>$1</b>")
 
-	// 10. Italic
+	// 12. Italic
 	text = italicRe1.ReplaceAllString(text, "<i>$1</i>")
 	text = italicRe2.ReplaceAllString(text, "<i>$1</i>")
 
-	// 11. Strikethrough
+	// 13. Strikethrough
 	text = strikeRe.ReplaceAllString(text, "<s>$1</s>")
 
-	// 12. Restore placeholders
+	// 14. Restore placeholders
 	for i, ph := range placeholders {
 		key := fmt.Sprintf("XZFMTBLOCK%dZX", i)
 		text = strings.ReplaceAll(text, key, ph)
