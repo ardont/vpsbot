@@ -38,23 +38,33 @@ type QueryRequest struct {
 	ResetSession   bool   `json:"reset_session,omitempty"`
 }
 
+type ToolStep struct {
+	StepIndex int    `json:"step_index"`
+	Action    string `json:"name"`
+	Summary   string `json:"summary"`
+	Detail    string `json:"detail,omitempty"`
+	Output    string `json:"output,omitempty"`
+}
+
 type Response struct {
 	Text           string
 	ConversationID string
 	Question       string
 	Options        []string
+	Steps          []ToolStep
 }
 
 type queryResponse struct {
-	Response       string   `json:"response"`
-	Text           string   `json:"text,omitempty"`
-	ConversationID string   `json:"conversation_id,omitempty"`
-	Question       string   `json:"question,omitempty"`
-	Options        []string `json:"options,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	Response       string     `json:"response"`
+	Text           string     `json:"text,omitempty"`
+	ConversationID string     `json:"conversation_id,omitempty"`
+	Question       string     `json:"question,omitempty"`
+	Options        []string   `json:"options,omitempty"`
+	Steps          []ToolStep `json:"steps,omitempty"`
+	Error          string     `json:"error,omitempty"`
 }
 
-type ProgressFunc func(action, summary string)
+type ProgressFunc func(action, summary, detail, output string)
 
 // AskStream sends a prompt and processes live tool progress events before returning the final response.
 func (c *Client) AskStream(ctx context.Context, prompt string, convID string, reset bool, onProgress ProgressFunc) (*Response, error) {
@@ -123,14 +133,17 @@ func (c *Client) AskStream(ctx context.Context, prompt string, convID string, re
 		}
 
 		var ev struct {
-			Type           string   `json:"type"`
-			Action         string   `json:"action"`
-			Summary        string   `json:"summary"`
-			Response       string   `json:"response"`
-			Question       string   `json:"question"`
-			Options        []string `json:"options"`
-			ConversationID string   `json:"conversation_id"`
-			Error          string   `json:"error"`
+			Type           string     `json:"type"`
+			Action         string     `json:"action"`
+			Summary        string     `json:"summary"`
+			Detail         string     `json:"detail"`
+			Output         string     `json:"output"`
+			Steps          []ToolStep `json:"steps"`
+			Response       string     `json:"response"`
+			Question       string     `json:"question"`
+			Options        []string   `json:"options"`
+			ConversationID string     `json:"conversation_id"`
+			Error          string     `json:"error"`
 		}
 		if err := json.Unmarshal(line, &ev); err != nil {
 			continue
@@ -139,7 +152,7 @@ func (c *Client) AskStream(ctx context.Context, prompt string, convID string, re
 		switch ev.Type {
 		case "progress":
 			if onProgress != nil && ev.Summary != "" {
-				onProgress(ev.Action, ev.Summary)
+				onProgress(ev.Action, ev.Summary, ev.Detail, ev.Output)
 			}
 		case "done":
 			replyText := ev.Response
@@ -148,6 +161,7 @@ func (c *Client) AskStream(ctx context.Context, prompt string, convID string, re
 				ConversationID: ev.ConversationID,
 				Question:       ev.Question,
 				Options:        ev.Options,
+				Steps:          ev.Steps,
 			}
 		case "error":
 			return nil, fmt.Errorf("%s", ev.Error)

@@ -27,12 +27,21 @@ type AskRequest struct {
 	ResetSession   bool   `json:"reset_session,omitempty"`
 }
 
+type ToolEvent struct {
+	StepIndex int    `json:"step_index"`
+	Name      string `json:"name"`
+	Summary   string `json:"summary"`
+	Detail    string `json:"detail,omitempty"`
+	Output    string `json:"output,omitempty"`
+}
+
 type AskResponse struct {
-	Response       string   `json:"response"`
-	Text           string   `json:"text,omitempty"`
-	ConversationID string   `json:"conversation_id"`
-	Question       string   `json:"question,omitempty"`
-	Options        []string `json:"options,omitempty"`
+	Response       string      `json:"response"`
+	Text           string      `json:"text,omitempty"`
+	ConversationID string      `json:"conversation_id"`
+	Question       string      `json:"question,omitempty"`
+	Options        []string    `json:"options,omitempty"`
+	Steps          []ToolEvent `json:"steps,omitempty"`
 }
 
 type AgentAPINewConvOutput struct {
@@ -51,20 +60,17 @@ type ToolCallItem struct {
 }
 
 type StreamEvent struct {
-	Type           string   `json:"type"` // "start", "progress", "done", "error"
-	ConversationID string   `json:"conversation_id,omitempty"`
-	Action         string   `json:"action,omitempty"`
-	Summary        string   `json:"summary,omitempty"`
-	Response       string   `json:"response,omitempty"`
-	Question       string   `json:"question,omitempty"`
-	Options        []string `json:"options,omitempty"`
-	Error          string   `json:"error,omitempty"`
-}
-
-type ToolEvent struct {
-	StepIndex int
-	Name      string
-	Summary   string
+	Type           string      `json:"type"` // "start", "progress", "done", "error"
+	ConversationID string      `json:"conversation_id,omitempty"`
+	Action         string      `json:"action,omitempty"`
+	Summary        string      `json:"summary,omitempty"`
+	Detail         string      `json:"detail,omitempty"`
+	Output         string      `json:"output,omitempty"`
+	Steps          []ToolEvent `json:"steps,omitempty"`
+	Response       string      `json:"response,omitempty"`
+	Question       string      `json:"question,omitempty"`
+	Options        []string    `json:"options,omitempty"`
+	Error          string      `json:"error,omitempty"`
 }
 
 type TranscriptStep struct {
@@ -73,6 +79,7 @@ type TranscriptStep struct {
 	Type      string         `json:"type"`
 	Status    string         `json:"status"`
 	Content   string         `json:"content"`
+	Thinking  string         `json:"thinking,omitempty"`
 	ToolCalls []ToolCallItem `json:"tool_calls,omitempty"`
 }
 
@@ -197,6 +204,7 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 				Question:       resp.Question,
 				Options:        resp.Options,
 				ConversationID: resp.ConversationID,
+				Steps:          resp.Steps,
 			})
 			flusher.Flush()
 			encMu.Unlock()
@@ -385,7 +393,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 
 			// Report intermediate tool progress to streaming client
 			for _, ev := range events {
-				if ev.StepIndex > lastReportedStep {
+				if ev.StepIndex > lastReportedStep || (ev.StepIndex == lastReportedStep && ev.Output != "") {
 					lastReportedStep = ev.StepIndex
 					if onProgress != nil && ev.Summary != "" {
 						onProgress(StreamEvent{
@@ -393,6 +401,8 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 							ConversationID: convID,
 							Action:         ev.Name,
 							Summary:        ev.Summary,
+							Detail:         ev.Detail,
+							Output:         ev.Output,
 						})
 					}
 				}
@@ -403,13 +413,14 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 					reply = "❓ " + question
 				}
 				if reply != "" || len(options) > 0 {
-					log.Printf("[agy-pilot] Session %s replied (%d chars, %d options)", convID, len(reply), len(options))
+					log.Printf("[agy-pilot] Session %s replied (%d chars, %d options, %d steps)", convID, len(reply), len(options), len(events))
 					return &AskResponse{
 						Response:       reply,
 						Text:           reply,
 						ConversationID: convID,
 						Question:       question,
 						Options:        options,
+						Steps:          events,
 					}, nil
 				}
 			}
@@ -463,11 +474,12 @@ func readTurnResponse(path string, startOffset int64) ([]ToolEvent, string, stri
 							optionsList = opts
 						}
 					} else {
-						summary := extractToolSummary(tc)
+						summary, detail := extractToolInfo(tc)
 						events = append(events, ToolEvent{
 							StepIndex: step.StepIndex,
 							Name:      tc.Name,
 							Summary:   summary,
+							Detail:    detail,
 						})
 					}
 				}
@@ -479,6 +491,20 @@ func readTurnResponse(path string, startOffset int64) ([]ToolEvent, string, stri
 				} else {
 					foundDone = false
 				}
+			} else if (step.Type == "GENERIC" || step.Source == "MODEL") && step.Content != "" && len(events) > 0 {
+				outText := step.Content
+				if idx := strings.Index(outText, "Command output:\n"); idx != -1 {
+					outText = outText[idx+len("Command output:\n"):]
+				} else if idx := strings.Index(outText, "Command exited with code"); idx != -1 {
+					outText = outText[idx:]
+				}
+				outText = strings.TrimSpace(outText)
+				if len(outText) > 200 {
+					outText = outText[:197] + "..."
+				}
+				if outText != "" && events[len(events)-1].Output == "" {
+					events[len(events)-1].Output = outText
+				}
 			}
 		}
 	}
@@ -489,33 +515,48 @@ func readTurnResponse(path string, startOffset int64) ([]ToolEvent, string, stri
 	return events, "", "", nil, false, nil
 }
 
-func extractToolSummary(tc ToolCallItem) string {
+func extractToolInfo(tc ToolCallItem) (string, string) {
 	if len(tc.Args) == 0 {
-		return formatToolName(tc.Name)
+		return formatToolName(tc.Name), ""
 	}
 
 	var args map[string]interface{}
 	if err := json.Unmarshal(tc.Args, &args); err != nil {
-		return formatToolName(tc.Name)
+		return formatToolName(tc.Name), ""
 	}
 
+	summary := ""
+	detail := ""
+
 	if s, ok := args["toolSummary"].(string); ok && s != "" {
-		return cleanSummary(s)
+		summary = cleanSummary(s)
 	}
+
 	if cmd, ok := args["CommandLine"].(string); ok && cmd != "" {
-		clean := cleanSummary(cmd)
-		if len(clean) > 42 {
-			clean = clean[:39] + "..."
+		detail = cleanSummary(cmd)
+		if summary == "" {
+			summary = "Команда: " + detail
+			if len(summary) > 45 {
+				summary = summary[:42] + "..."
+			}
 		}
-		return clean
+	} else if p, ok := args["Path"].(string); ok && p != "" {
+		detail = cleanSummary(p)
+		if summary == "" {
+			summary = formatToolName(tc.Name) + ": " + filepath.Base(detail)
+		}
+	} else if q, ok := args["query"].(string); ok && q != "" {
+		detail = cleanSummary(q)
+		if summary == "" {
+			summary = "Поиск: " + detail
+		}
 	}
-	if p, ok := args["Path"].(string); ok && p != "" {
-		return "Файл: " + filepath.Base(cleanSummary(p))
+
+	if summary == "" {
+		summary = formatToolName(tc.Name)
 	}
-	if q, ok := args["query"].(string); ok && q != "" {
-		return "Поиск: " + cleanSummary(q)
-	}
-	return formatToolName(tc.Name)
+
+	return summary, detail
 }
 
 func cleanSummary(s string) string {

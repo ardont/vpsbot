@@ -219,6 +219,14 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		case "/sec", "/security", "/firewall", "/lockdown":
 			b.showSecurityMenu(msg.Chat.ID, 0)
 
+		case "/verbose", "/debug", "/steps", "/details":
+			enabled := b.toggleVerboseMode(userID)
+			if enabled {
+				b.sendText(msg.Chat.ID, "🔬 <b>Подробный режим ВКЛЮЧЕН!</b>\nТеперь бот будет выводить промежуточные шаги, запускаемые команды и их результаты.")
+			} else {
+				b.sendText(msg.Chat.ID, "⚡ <b>Краткий режим ВКЛЮЧЕН!</b>\nБот будет выводить только чистый итоговый ответ.")
+			}
+
 		case "/top":
 			b.replyTop(msg.Chat.ID)
 
@@ -765,6 +773,17 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		}
 		b.sendText(chatID, fmt.Sprintf("🧠 <b>Активная сессия Antigravity:</b>\n%s\n\nМодель: <code>gemini-3.8-flash-high</code>\nМост: <code>agy-pilot (:43430)</code>", sess))
 
+	case "act_toggle_verbose":
+		enabled := b.toggleVerboseMode(userID)
+		toast := "Краткий режим включен"
+		if enabled {
+			toast = "Подробный ход (Шаги и Логи) включен!"
+		}
+		cbAlert := tgbotapi.NewCallback(cb.ID, toast)
+		_, _ = b.api.Request(cbAlert)
+		b.showAIMenu(chatID, msgID, userID)
+		return
+
 	case "act_create_invite":
 		if b.checkAdmin(chatID, userID) {
 			b.replyCreateInvite(chatID, userID, 24)
@@ -1114,6 +1133,27 @@ func (b *Bot) sendPriorityMenu(chatID int64) {
 	b.showPriorityMenu(chatID, 0)
 }
 
+const verboseConfigPath = "/opt/superbot/verbose_mode.txt"
+
+func (b *Bot) isVerboseMode(userID int64) bool {
+	data, err := os.ReadFile(verboseConfigPath)
+	if err == nil {
+		s := strings.TrimSpace(string(data))
+		return s == "true" || s == "1"
+	}
+	return false
+}
+
+func (b *Bot) toggleVerboseMode(userID int64) bool {
+	newVal := !b.isVerboseMode(userID)
+	s := "false"
+	if newVal {
+		s = "true"
+	}
+	_ = os.WriteFile(verboseConfigPath, []byte(s), 0644)
+	return newVal
+}
+
 func (b *Bot) showAIMenu(chatID int64, msgID int, userID int64) {
 	sess := b.getSession(userID)
 	statusText := "Сессия: <i>новая</i>"
@@ -1129,6 +1169,11 @@ func (b *Bot) showAIMenu(chatID int64, msgID int, userID int64) {
 		modeLabel = "🛡 Режим: Турбо VPN"
 	}
 
+	verboseBtn := "🔬 Подробный ход (Шаги & Логи): ВЫКЛ"
+	if b.isVerboseMode(userID) {
+		verboseBtn = "🔬 Подробный ход: ВКЛ ✅"
+	}
+
 	markup := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Начать новый диалог", "act_new_ai"),
@@ -1136,6 +1181,9 @@ func (b *Bot) showAIMenu(chatID int64, msgID int, userID int64) {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(modeLabel, "menu_prio"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(verboseBtn, "act_toggle_verbose"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📋 Лог agy-pilot", "act_log_agypilot"),
@@ -1549,31 +1597,88 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 	}()
 	defer close(stopTyping)
 
-	// Rate-limited real-time progress updates to Telegram
+	type liveStep struct {
+		Action  string
+		Summary string
+		Detail  string
+		Output  string
+	}
+	var steps []liveStep
 	var lastEdit time.Time
-	var lastSummary string
 	var editMu sync.Mutex
 
-	onProgress := func(action, summary string) {
+	onProgress := func(action, summary, detail, output string) {
 		if waitMsgID <= 0 || summary == "" {
 			return
 		}
 		editMu.Lock()
 		defer editMu.Unlock()
 
-		if summary == lastSummary {
-			return
+		n := len(steps)
+		if n == 0 || steps[n-1].Summary != summary || (steps[n-1].Detail != detail && detail != "") {
+			steps = append(steps, liveStep{
+				Action:  action,
+				Summary: summary,
+				Detail:  detail,
+				Output:  output,
+			})
+		} else {
+			if detail != "" && steps[n-1].Detail == "" {
+				steps[n-1].Detail = detail
+			}
+			if output != "" {
+				steps[n-1].Output = output
+			}
 		}
-		lastSummary = summary
 
-		// Telegram rate-limiting: at most 1 edit every 1800ms
-		if time.Since(lastEdit) < 1800*time.Millisecond {
+		// Telegram rate-limiting: at most 1 edit every 1600ms
+		if time.Since(lastEdit) < 1600*time.Millisecond {
 			return
 		}
 		lastEdit = time.Now()
 
-		statusText := fmt.Sprintf("⏳ <b>В процессе:</b>\n└ ⚡ <i>%s...</i>", html.EscapeString(summary))
-		edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, statusText)
+		var sb strings.Builder
+		sb.WriteString("🧠 <b>Antigravity выполняет задачу:</b>\n\n")
+
+		const maxVisible = 4
+		startIdx := 0
+		if len(steps) > maxVisible {
+			startIdx = len(steps) - maxVisible
+			sb.WriteString(fmt.Sprintf("<i>... выполнено предыдущих шагов: %d</i>\n\n", startIdx))
+		}
+
+		for i := startIdx; i < len(steps); i++ {
+			st := steps[i]
+			isCurrent := (i == len(steps)-1)
+			if isCurrent {
+				sb.WriteString(fmt.Sprintf("⚡ <b>%s</b>\n", html.EscapeString(st.Summary)))
+				if st.Detail != "" {
+					d := st.Detail
+					if len(d) > 50 {
+						d = d[:47] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("   └ <code>%s</code>\n", html.EscapeString(d)))
+				}
+				if st.Output != "" {
+					outSnippet := st.Output
+					if len(outSnippet) > 60 {
+						outSnippet = outSnippet[:57] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("   └ <i>%s</i>\n", html.EscapeString(outSnippet)))
+				}
+			} else {
+				sb.WriteString(fmt.Sprintf("• ✅ <i>%s</i>\n", html.EscapeString(st.Summary)))
+				if st.Detail != "" {
+					d := st.Detail
+					if len(d) > 40 {
+						d = d[:37] + "..."
+					}
+					sb.WriteString(fmt.Sprintf("   └ <code>%s</code>\n", html.EscapeString(d)))
+				}
+			}
+		}
+
+		edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, sb.String())
 		edit.ParseMode = "HTML"
 		_, _ = b.api.Send(edit)
 	}
@@ -1605,6 +1710,31 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 
 	// Format reply: Convert Markdown to clean Telegram HTML & extract server files
 	formatted := formatter.ConvertMarkdownToTelegramHTML(rawReply)
+
+	// If verbose mode is enabled, include executed steps and tool outputs
+	if b.isVerboseMode(userID) && len(resp.Steps) > 0 {
+		var header strings.Builder
+		header.WriteString(fmt.Sprintf("🛠 <b>Выполненные шаги (%d):</b>\n", len(resp.Steps)))
+		for i, st := range resp.Steps {
+			header.WriteString(fmt.Sprintf("%d. <b>%s</b>\n", i+1, html.EscapeString(st.Summary)))
+			if st.Detail != "" {
+				d := st.Detail
+				if len(d) > 65 {
+					d = d[:62] + "..."
+				}
+				header.WriteString(fmt.Sprintf("   └ <code>%s</code>\n", html.EscapeString(d)))
+			}
+			if st.Output != "" {
+				outSnippet := st.Output
+				if len(outSnippet) > 85 {
+					outSnippet = outSnippet[:82] + "..."
+				}
+				header.WriteString(fmt.Sprintf("   └ <i>Результат: %s</i>\n", html.EscapeString(outSnippet)))
+			}
+		}
+		header.WriteString("\n")
+		formatted.HTMLText = header.String() + formatted.HTMLText
+	}
 
 	// Prepare inline buttons if ask_question options were returned
 	var optMarkup *tgbotapi.InlineKeyboardMarkup
