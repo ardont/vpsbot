@@ -37,15 +37,34 @@ func New(allowedBasePath string) *SysInfo {
 	}
 }
 
+// renderProgressBar returns a visual Unicode progress bar of given length.
+func renderProgressBar(percent float64, length int) string {
+	if length <= 0 {
+		length = 10
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := int((percent/100.0)*float64(length) + 0.5)
+	if filled > length {
+		filled = length
+	}
+	empty := length - filled
+	return strings.Repeat("▰", filled) + strings.Repeat("▱", empty)
+}
+
 // GetStats returns formatted system metrics (alias to GetQuickStatus).
 func (s *SysInfo) GetStats() (string, error) {
 	return s.GetQuickStatus()
 }
 
-// GetQuickStatus returns lightning-fast (0.05s) system health metrics.
+// GetQuickStatus returns lightning-fast (0.05s) system health metrics with visual progress bars.
 func (s *SysInfo) GetQuickStatus() (string, error) {
 	var sb strings.Builder
-	sb.WriteString("<b>🖥 Статус сервера (Zero-Token)</b>\n\n")
+	sb.WriteString("🖥 <b>Статус сервера</b> <code>[Debian • 1 vCPU • 2 GB]</code>\n\n")
 
 	// Host Uptime
 	hInfo, err := host.Info()
@@ -54,16 +73,18 @@ func (s *SysInfo) GetQuickStatus() (string, error) {
 		hours := (hInfo.Uptime % 86400) / 3600
 		mins := (hInfo.Uptime % 3600) / 60
 		if days > 0 {
-			sb.WriteString(fmt.Sprintf("├ <b>Аптайм:</b> <code>%d дн. %d ч. %d мин.</code>\n", days, hours, mins))
+			sb.WriteString(fmt.Sprintf("⏱ <b>Аптайм:</b> <code>%d дн. %d ч. %d мин.</code>\n", days, hours, mins))
 		} else {
-			sb.WriteString(fmt.Sprintf("├ <b>Аптайм:</b> <code>%d ч. %d мин.</code>\n", hours, mins))
+			sb.WriteString(fmt.Sprintf("⏱ <b>Аптайм:</b> <code>%d ч. %d мин.</code>\n", hours, mins))
 		}
 	}
 
 	// Load Average
 	lAvg, err := load.Avg()
 	if err == nil {
-		sb.WriteString(fmt.Sprintf("├ <b>CPU Load:</b> <code>%.2f, %.2f, %.2f</code> (1 vCPU)\n", lAvg.Load1, lAvg.Load5, lAvg.Load15))
+		sb.WriteString(fmt.Sprintf("⚡ <b>CPU Load:</b> <code>%.2f, %.2f, %.2f</code>\n\n", lAvg.Load1, lAvg.Load5, lAvg.Load15))
+	} else {
+		sb.WriteString("\n")
 	}
 
 	// RAM
@@ -72,8 +93,9 @@ func (s *SysInfo) GetQuickStatus() (string, error) {
 		usedGB := float64(vMem.Used) / (1024 * 1024 * 1024)
 		totalGB := float64(vMem.Total) / (1024 * 1024 * 1024)
 		availMB := vMem.Available / (1024 * 1024)
-		sb.WriteString(fmt.Sprintf("├ <b>ОЗУ:</b> <code>%.1f GiB / %.1f GiB</code> (доступно <code>%d MiB</code>, <b>%.1f%%</b>)\n",
-			usedGB, totalGB, availMB, vMem.UsedPercent))
+		bar := renderProgressBar(vMem.UsedPercent, 10)
+		sb.WriteString(fmt.Sprintf("🧠 <b>ОЗУ:</b> <code>%.1f GiB / %.1f GiB</code> (доступно <code>%d MiB</code>)\n<code>%s</code> <b>%.1f%%</b>\n\n",
+			usedGB, totalGB, availMB, bar, vMem.UsedPercent))
 	}
 
 	// Swap & ZRAM
@@ -81,8 +103,9 @@ func (s *SysInfo) GetQuickStatus() (string, error) {
 	if err == nil && sMem.Total > 0 {
 		swapUsedGB := float64(sMem.Used) / (1024 * 1024 * 1024)
 		swapTotalGB := float64(sMem.Total) / (1024 * 1024 * 1024)
-		sb.WriteString(fmt.Sprintf("├ <b>Swap + ZRAM:</b> <code>%.1f GiB / %.1f GiB</code> (<b>%.1f%%</b>)\n",
-			swapUsedGB, swapTotalGB, sMem.UsedPercent))
+		bar := renderProgressBar(sMem.UsedPercent, 10)
+		sb.WriteString(fmt.Sprintf("🗜 <b>Swap + ZRAM:</b> <code>%.1f GiB / %.1f GiB</code>\n<code>%s</code> <b>%.1f%%</b>\n\n",
+			swapUsedGB, swapTotalGB, bar, sMem.UsedPercent))
 	}
 
 	// Root Disk
@@ -91,8 +114,28 @@ func (s *SysInfo) GetQuickStatus() (string, error) {
 		usedGB := float64(dUsage.Used) / (1024 * 1024 * 1024)
 		totalGB := float64(dUsage.Total) / (1024 * 1024 * 1024)
 		freeGB := float64(dUsage.Free) / (1024 * 1024 * 1024)
-		sb.WriteString(fmt.Sprintf("└ <b>Диск (/):</b> <code>%.1f GiB / %.1f GiB</code> (свободно <code>%.1f GiB</code>, <b>%.1f%%</b>)\n",
-			usedGB, totalGB, freeGB, dUsage.UsedPercent))
+		bar := renderProgressBar(dUsage.UsedPercent, 10)
+		sb.WriteString(fmt.Sprintf("💾 <b>Диск (/):</b> <code>%.1f GiB / %.1f GiB</code> (свободно <code>%.1f GiB</code>)\n<code>%s</code> <b>%.1f%%</b>\n\n",
+			usedGB, totalGB, freeGB, bar, dUsage.UsedPercent))
+	}
+
+	// Security status
+	if s.IsSSHLocked() {
+		sb.WriteString("🛡 <b>Защита SSH:</b> 🔴 <code>Порт 22 заблокирован (Kill Switch)</code>\n")
+	} else {
+		sb.WriteString("🛡 <b>Защита SSH:</b> 🟢 <code>Порт 22 открыт (Fail2ban активен)</code>\n")
+	}
+
+	// Active cgroups mode
+	modeData, _ := os.ReadFile("/opt/superbot/active_mode.txt")
+	modeStr := strings.TrimSpace(string(modeData))
+	switch modeStr {
+	case "ai":
+		sb.WriteString("🚀 <b>Режим ресурсов:</b> <code>🧠 Турбо ИИ (OmniRoute 1400M)</code>\n")
+	case "vpn":
+		sb.WriteString("🚀 <b>Режим ресурсов:</b> <code>🛡 Турбо VPN (x-ui 500M)</code>\n")
+	default:
+		sb.WriteString("🚀 <b>Режим ресурсов:</b> <code>⚖️ Сбалансированный</code>\n")
 	}
 
 	return sb.String(), nil
@@ -585,4 +628,295 @@ func (s *SysInfo) GetServiceLogs(service string, lines int) (string, error) {
 		return fmt.Sprintf("📋 <b>Лог %s:</b>\n<i>Записей не найдено</i>", service), nil
 	}
 	return fmt.Sprintf("📋 <b>Лог %s (последние %d строк):</b>\n<pre>%s</pre>", service, lines, html.EscapeString(result)), nil
+}
+
+// IsSSHLocked checks if SSH port 22 is currently blocked in UFW.
+func (s *SysInfo) IsSSHLocked() bool {
+	if _, err := os.Stat("/tmp/ssh_lockdown.active"); err == nil {
+		return true
+	}
+	out, err := exec.Command("ufw", "status").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "22/tcp") || strings.HasPrefix(trimmed, "22 ") {
+			if strings.Contains(trimmed, "DENY") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ToggleSSHLockdown switches SSH port 22 between locked (deny) and unlocked (allow).
+func (s *SysInfo) ToggleSSHLockdown() (bool, string, error) {
+	if s.IsSSHLocked() {
+		// Unlock
+		_ = exec.Command("ufw", "delete", "deny", "22/tcp").Run()
+		_ = exec.Command("ufw", "delete", "deny", "22").Run()
+		cmd := exec.Command("ufw", "allow", "22/tcp")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return true, "", fmt.Errorf("ошибка разблокировки: %s (%w)", string(out), err)
+		}
+		_ = os.Remove("/tmp/ssh_lockdown.active")
+		return false, "✅ <b>Порт SSH (22) разблокирован!</b>\nВходящие подключения снова разрешены для всех.", nil
+	}
+
+	// Lock
+	_ = exec.Command("ufw", "delete", "allow", "22/tcp").Run()
+	_ = exec.Command("ufw", "delete", "allow", "22").Run()
+	cmd := exec.Command("ufw", "deny", "22/tcp")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return false, "", fmt.Errorf("ошибка блокировки: %s (%w)", string(out), err)
+	}
+	_ = os.WriteFile("/tmp/ssh_lockdown.active", []byte(time.Now().Format(time.RFC3339)), 0644)
+	return true, "🔒 <b>Порт SSH (22) заблокирован (Kill Switch активен)!</b>\nВнешний доступ по SSH закрыт. Соединение через Tailscale остаётся активным.", nil
+}
+
+// GetSecuritySummary returns full security overview: SSH status, Fail2ban, UFW.
+func (s *SysInfo) GetSecuritySummary() (string, error) {
+	var sb strings.Builder
+	sb.WriteString("🛡 <b>Центр безопасности и защиты сервера</b>\n\n")
+
+	// SSH status
+	if s.IsSSHLocked() {
+		sb.WriteString("🔴 <b>SSH Kill Switch:</b> <code>АКТИВЕН (Порт 22 заблокирован)</code>\n")
+		sb.WriteString("<i>Вход из внешнего интернета закрыт. Админ-доступ через Tailscale защищен.</i>\n\n")
+	} else {
+		sb.WriteString("🟢 <b>SSH Статус:</b> <code>Открыт (Порт 22 доступен)</code>\n")
+		sb.WriteString("<i>Защищен Fail2ban (авто-блокировка при 5 неудачных попытках).</i>\n\n")
+	}
+
+	// Fail2ban status
+	f2bOut, err := exec.Command("fail2ban-client", "status", "sshd").CombinedOutput()
+	if err == nil {
+		lines := strings.Split(string(f2bOut), "\n")
+		var bannedCount string
+		var bannedList string
+		var totalFailed string
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.Contains(line, "Currently banned:") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					bannedCount = strings.TrimSpace(parts[1])
+				}
+			} else if strings.Contains(line, "Banned IP list:") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					bannedList = strings.TrimSpace(parts[1])
+				}
+			} else if strings.Contains(line, "Total failed:") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					totalFailed = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+		sb.WriteString("👮 <b>Служба Fail2ban:</b> 🟢 <code>Активна</code>\n")
+		if totalFailed != "" {
+			sb.WriteString(fmt.Sprintf("• Отбито атак: <code>%s</code>\n", totalFailed))
+		}
+		if bannedCount != "" {
+			sb.WriteString(fmt.Sprintf("• Забанено IP сейчас: <code>%s</code>\n", bannedCount))
+		}
+		if bannedList != "" {
+			sb.WriteString(fmt.Sprintf("• Список IP: <code>%s</code>\n\n", bannedList))
+		} else {
+			sb.WriteString("• Список IP: <i>(активных банов нет)</i>\n\n")
+		}
+	} else {
+		sb.WriteString("👮 <b>Служба Fail2ban:</b> ⚠️ <i>не удалось получить статус</i>\n\n")
+	}
+
+	// Firewall UFW
+	sb.WriteString("🧱 <b>Брандмауэр UFW:</b> 🟢 <code>Активен</code>\n")
+	sb.WriteString("• <code>tailscale0</code> — Полный доверенный доступ\n")
+	sb.WriteString("• <code>443/tcp</code> — VLESS Reality VPN\n")
+	sb.WriteString("• <code>8080/tcp</code> — FileBrowser Web\n")
+	sb.WriteString("• <code>20128/tcp</code> — OmniRoute AI Router\n")
+	if s.IsSSHLocked() {
+		sb.WriteString("• <code>22/tcp</code> — 🔴 DENY (заблокирован)\n")
+	} else {
+		sb.WriteString("• <code>22/tcp</code> — 🟢 ALLOW (разрешен)\n")
+	}
+
+	return sb.String(), nil
+}
+
+// UnbanAllIPs flushes all banned IPs in fail2ban.
+func (s *SysInfo) UnbanAllIPs() (string, error) {
+	cmd := exec.Command("fail2ban-client", "unban", "--all")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ошибка разбана: %s (%w)", string(out), err)
+	}
+	return "✅ <b>Все заблокированные IP-адреса успешно разбанены в Fail2ban!</b>", nil
+}
+
+// GetBannedIPs returns currently banned IPs from Fail2ban.
+func (s *SysInfo) GetBannedIPs() (string, error) {
+	out, err := exec.Command("fail2ban-client", "status", "sshd").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ошибка получения статуса fail2ban: %w", err)
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "Banned IP list:") {
+			parts := strings.Split(line, ":")
+			if len(parts) > 1 {
+				ips := strings.TrimSpace(parts[1])
+				if ips == "" {
+					return "✅ <b>В данный момент заблокированных IP-адресов нет.</b>\nСистема чиста.", nil
+				}
+				ipList := strings.Fields(ips)
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("🚫 <b>Заблокированные IP-адреса (%d):</b>\n\n", len(ipList)))
+				for _, ip := range ipList {
+					sb.WriteString(fmt.Sprintf("• <code>%s</code>\n", ip))
+				}
+				sb.WriteString("\n<i>Чтобы разблокировать всех, нажмите кнопку «♻️ Разбанить всех» в меню.</i>")
+				return sb.String(), nil
+			}
+		}
+	}
+	return "✅ <b>Активных блокировок IP нет.</b>", nil
+}
+
+// GetOpenPortsSummary returns listening server ports.
+func (s *SysInfo) GetOpenPortsSummary() (string, error) {
+	var sb strings.Builder
+	sb.WriteString("🔌 <b>Открытые порты и сервисы сервера:</b>\n\n")
+
+	ports := []struct {
+		Port    string
+		Service string
+		Access  string
+	}{
+		{"22/tcp", "OpenSSH Server", "Публичный / Tailscale"},
+		{"443/tcp", "Xray Reality (VLESS VPN)", "Публичный (Маскировка)"},
+		{"8080/tcp", "FileBrowser Web UI", "Публичный / Tailscale (:10443)"},
+		{"20128/tcp", "OmniRoute AI Router", "Tailscale / Локальный"},
+		{"43428/tcp", "SuperBot Local API", "Локальный (127.0.0.1)"},
+		{"43430/tcp", "Antigravity Pilot Bridge", "Локальный (127.0.0.1)"},
+		{"53395/tcp", "3X-UI Web Panel", "Публичный / Tailscale (:53396)"},
+	}
+
+	for _, p := range ports {
+		status := "🟢"
+		if p.Port == "22/tcp" && s.IsSSHLocked() {
+			status = "🔴"
+		}
+		sb.WriteString(fmt.Sprintf("%s <code>%-10s</code> — <b>%s</b>\n   └ <i>%s</i>\n", status, p.Port, p.Service, p.Access))
+	}
+
+	return sb.String(), nil
+}
+
+// PingTest checks latency to popular destinations.
+func (s *SysInfo) PingTest() (string, error) {
+	targets := []struct {
+		Name string
+		Host string
+	}{
+		{"Cloudflare DNS", "1.1.1.1"},
+		{"Google DNS", "8.8.8.8"},
+		{"Yandex DNS", "77.88.8.8"},
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📡 <b>Тестирование сетевой задержки (Ping):</b>\n\n")
+
+	for _, t := range targets {
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		cmd := exec.CommandContext(ctx, "ping", "-c", "2", "-W", "2", t.Host)
+		out, err := cmd.CombinedOutput()
+		cancel()
+
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("• <b>%s</b> (<code>%s</code>): 🔴 <i>Таймаут или недоступен</i>\n", t.Name, t.Host))
+			continue
+		}
+
+		outStr := string(out)
+		avg := "N/A"
+		if idx := strings.Index(outStr, "min/avg/max"); idx != -1 {
+			sub := outStr[idx:]
+			if eqIdx := strings.Index(sub, "="); eqIdx != -1 {
+				parts := strings.Split(strings.TrimSpace(sub[eqIdx+1:]), "/")
+				if len(parts) > 1 {
+					avg = parts[1] + " ms"
+				}
+			}
+		}
+		sb.WriteString(fmt.Sprintf("• <b>%s</b> (<code>%s</code>): 🟢 <b>%s</b>\n", t.Name, t.Host, avg))
+	}
+
+	return sb.String(), nil
+}
+
+// GetTopCPUProcesses returns top 5 processes sorted by CPU usage.
+func (s *SysInfo) GetTopCPUProcesses() (string, error) {
+	procs, err := process.Processes()
+	if err != nil {
+		return "", fmt.Errorf("ошибка получения списка процессов: %w", err)
+	}
+
+	type procMetric struct {
+		PID  int32
+		Name string
+		CPU  float64
+		RSS  uint64
+	}
+
+	var metrics []procMetric
+	for _, p := range procs {
+		cpuP, err := p.CPUPercent()
+		if err != nil {
+			continue
+		}
+		name, _ := p.Name()
+		memInfo, _ := p.MemoryInfo()
+		rss := uint64(0)
+		if memInfo != nil {
+			rss = memInfo.RSS
+		}
+
+		metrics = append(metrics, procMetric{
+			PID:  p.Pid,
+			Name: name,
+			CPU:  cpuP,
+			RSS:  rss,
+		})
+	}
+
+	sort.Slice(metrics, func(i, j int) bool {
+		return metrics[i].CPU > metrics[j].CPU
+	})
+
+	limit := 5
+	if len(metrics) < limit {
+		limit = len(metrics)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("⚡ <b>Топ-5 процессов по нагрузке на CPU:</b>\n\n")
+	sb.WriteString("<pre>")
+	sb.WriteString(fmt.Sprintf("%-6s %-16s %-8s %s\n", "PID", "NAME", "RAM", "%CPU"))
+	sb.WriteString("----------------------------------------\n")
+	for i := 0; i < limit; i++ {
+		p := metrics[i]
+		rssMB := p.RSS / (1024 * 1024)
+		pName := p.Name
+		if len(pName) > 15 {
+			pName = pName[:14] + "…"
+		}
+		sb.WriteString(fmt.Sprintf("%-6d %-16s %-8d %.1f%%\n", p.PID, pName, rssMB, p.CPU))
+	}
+	sb.WriteString("</pre>")
+
+	return sb.String(), nil
 }

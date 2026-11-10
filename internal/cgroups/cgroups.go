@@ -2,6 +2,7 @@ package cgroups
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -15,6 +16,8 @@ const (
 	ModeAI       Mode = "ai"
 	ModeBalanced Mode = "auto"
 )
+
+const modeFilePath = "/opt/superbot/active_mode.txt"
 
 // Manager manages dynamic priority allocations using cgroups v2 / systemd slices.
 type Manager struct {
@@ -34,6 +37,18 @@ func New(vpnService, aiService string) *Manager {
 		vpnService: vpnService,
 		aiService:  aiService,
 	}
+}
+
+// GetMode returns the currently active mode from disk or default ModeBalanced.
+func (m *Manager) GetMode() Mode {
+	data, err := os.ReadFile(modeFilePath)
+	if err == nil {
+		m := Mode(strings.TrimSpace(string(data)))
+		if m == ModeAI || m == ModeVPN || m == ModeBalanced {
+			return m
+		}
+	}
+	return ModeBalanced
 }
 
 // SetMode dynamically changes resource weights for vpn.slice and ai.slice.
@@ -89,6 +104,8 @@ func (m *Manager) SetMode(mode Mode) (string, error) {
 	if err := exec.Command("systemctl", "set-property", "ai.slice", fmt.Sprintf("CPUWeight=%s", aiWeight), fmt.Sprintf("MemoryHigh=%s", aiMemHigh)).Run(); err != nil {
 		return "", fmt.Errorf("ошибка настройки ai.slice: %w", err)
 	}
+
+	_ = os.WriteFile(modeFilePath, []byte(string(mode)), 0644)
 
 	return fmt.Sprintf(
 		"<b>%s</b>\n\n"+

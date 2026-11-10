@@ -13,11 +13,18 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+// InlineButton represents an inline keyboard button.
+type InlineButton struct {
+	Text string `json:"text"`
+	Data string `json:"data"`
+}
+
 // SendRequest is the payload sent by Antigravity or local scripts to deliver messages to TG.
 type SendRequest struct {
-	Text      string `json:"text"`
-	FilePath  string `json:"file_path,omitempty"`
-	ParseMode string `json:"parse_mode,omitempty"`
+	Text      string           `json:"text"`
+	FilePath  string           `json:"file_path,omitempty"`
+	ParseMode string           `json:"parse_mode,omitempty"`
+	Buttons   [][]InlineButton `json:"buttons,omitempty"`
 }
 
 // Server provides a local HTTP endpoint for Antigravity and scripts to push notifications.
@@ -122,6 +129,19 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		} else {
 			msg.ParseMode = "HTML"
 		}
+
+		if len(req.Buttons) > 0 {
+			var rows [][]tgbotapi.InlineKeyboardButton
+			for _, r := range req.Buttons {
+				var row []tgbotapi.InlineKeyboardButton
+				for _, btn := range r {
+					row = append(row, tgbotapi.NewInlineKeyboardButtonData(btn.Text, btn.Data))
+				}
+				rows = append(rows, row)
+			}
+			msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+		}
+
 		if _, err := s.bot.Send(msg); err != nil {
 			log.Printf("[Local API] Error sending message to TG: %v", err)
 			http.Error(w, fmt.Sprintf(`{"error":"telegram send error: %s"}`, err.Error()), http.StatusInternalServerError)
