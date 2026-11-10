@@ -49,28 +49,28 @@ func (m *Manager) SetMode(mode Mode) (string, error) {
 
 	switch mode {
 	case ModeVPN:
-		vpnWeight = "850"
-		vpnMemHigh = "1200M"
-		aiWeight = "250"
-		aiMemHigh = "350M"
+		vpnWeight = "700"
+		vpnMemHigh = "500M"
+		aiWeight = "400"
+		aiMemHigh = "950M"
 		modeTitle = "🚀 РЕЖИМ: ТУРБО VPN"
-		desc = "VPN (x-ui) получил приоритет сети и CPU. ИИ защищен от голодания (25% CPU, 350M RAM headroom)."
+		desc = "VPN (x-ui) получил приоритет сети и CPU. Сервисы ИИ защищены от троттлинга (950M RAM, 40% CPU)."
 
 	case ModeAI:
-		vpnWeight = "200"
-		vpnMemHigh = "400M"
+		vpnWeight = "250"
+		vpnMemHigh = "350M"
 		aiWeight = "900"
 		aiMemHigh = "1400M"
 		modeTitle = "🧠 РЕЖИМ: СУПЕР-АГЕНТ (AI)"
-		desc = "Antigravity/OmniRoute получил максимальный приоритет CPU/RAM. VPN сохраняет гарантированные ресурсы."
+		desc = "Antigravity/OmniRoute получил максимальный приоритет CPU/RAM. VPN сохраняет гарантированные ресурсы (350M)."
 
 	case ModeBalanced, "balanced":
 		vpnWeight = "500"
-		vpnMemHigh = "800M"
-		aiWeight = "500"
-		aiMemHigh = "800M"
+		vpnMemHigh = "450M"
+		aiWeight = "600"
+		aiMemHigh = "1100M"
 		modeTitle = "⚖️ РЕЖИМ: СБАЛАНСИРОВАННЫЙ"
-		desc = "Ресурсы сервера поровну распределены между VPN-трафиком (x-ui) и агентом (50/50)."
+		desc = "Ресурсы сервера оптимально распределены между VPN-трафиком (x-ui 450M) и агентом (AI 1100M)."
 
 	default:
 		return "", fmt.Errorf("неизвестный режим '%s'. Доступные: vpn, ai, auto", mode)

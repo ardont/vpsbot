@@ -1257,7 +1257,9 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string) {
 	activeConvID := b.getSession(userID)
 	resp, err := b.aiCli.AskStream(ctx, prompt, activeConvID, false, onProgress)
 	if err != nil {
-		errMsg := fmt.Sprintf("⚠️ <b>Antigravity Bridge:</b>\n%s", html.EscapeString(err.Error()))
+		// Reset active session so future queries start clean and don't loop on broken sessions
+		b.setSession(userID, "")
+		errMsg := fmt.Sprintf("⚠️ <b>Antigravity Bridge:</b>\n%s\n\n<i>Сессия автоматически сброшена. Следующее сообщение начнет чистый диалог.</i>", html.EscapeString(err.Error()))
 		if waitMsgID > 0 {
 			edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, errMsg)
 			edit.ParseMode = "HTML"
