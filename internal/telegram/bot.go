@@ -205,6 +205,12 @@ func (b *Bot) handleMessage(msg *IncomingMessage) {
 	case "🧹 Очистить RAM", "🧹 Очистить кэш", "🧹 Очистка":
 		b.replyDropCaches(msg.Chat.ID)
 		return
+	case "🔄 Рестарт VPN", "рестарт vpn":
+		b.replyVPNRestart(msg.Chat.ID)
+		return
+	case "🌐 Сервисы", "🌐 Сервисы TS", "сервисы":
+		b.showServicesMenu(msg.Chat.ID, 0)
+		return
 	case "🌐 Сеть & VPN", "🌐 Сеть & TS", "🌍 Сеть & TS", "🌐 Сеть":
 		b.replyNetInfo(msg.Chat.ID)
 		return
@@ -236,6 +242,9 @@ func (b *Bot) handleMessage(msg *IncomingMessage) {
 		case "/start", "/menu":
 			b.sendPersistentKeyboard(msg.Chat.ID, "👋 <b>Добро пожаловать в SuperBot!</b>\nКнопки быстрого доступа закреплены внизу экрана 👇")
 			b.sendMainMenu(msg.Chat.ID, "⚙️ <b>Интерактивные разделы:</b>")
+
+		case "/services", "/serv":
+			b.showServicesMenu(msg.Chat.ID, 0)
 
 		case "/help":
 			b.replyHelp(msg.Chat.ID, userID)
@@ -523,8 +532,20 @@ func (b *Bot) downloadTelegramFile(fileID, destPath string) error {
 // ==============================================================================
 
 func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
-	ack := tgbotapi.NewCallback(cb.ID, "")
-	_, _ = b.api.Request(ack)
+	answered := false
+	answerCb := func(text string, showAlert bool) {
+		if !answered {
+			cbAlert := tgbotapi.NewCallback(cb.ID, text)
+			cbAlert.ShowAlert = showAlert
+			_, _ = b.api.Request(cbAlert)
+			answered = true
+		}
+	}
+	defer func() {
+		if !answered {
+			answerCb("", false)
+		}
+	}()
 
 	data := cb.Data
 	chatID := cb.Message.Chat.ID
@@ -546,32 +567,28 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 	switch data {
 	case "unlock_ssh":
 		if userID != b.cfg.TelegramAdminID && userID != 5342950903 {
-			cbAlert := tgbotapi.NewCallback(cb.ID, "Отказано в доступе")
-			cbAlert.ShowAlert = true
-			_, _ = b.api.Request(cbAlert)
+			answerCb("Отказано в доступе", true)
 			return
 		}
 
-		_ = exec.Command("ufw", "delete", "deny", "22/tcp").Run()
-		cmd := exec.Command("ufw", "allow", "22/tcp")
-		if err := cmd.Run(); err != nil {
-			cbAlert := tgbotapi.NewCallback(cb.ID, "Ошибка разблокировки: "+err.Error())
-			cbAlert.ShowAlert = true
-			_, _ = b.api.Request(cbAlert)
+		replyText, err := b.sys.UnlockSSH()
+		if err != nil {
+			answerCb("Ошибка разблокировки: "+err.Error(), true)
 			return
 		}
-		_ = os.Remove("/tmp/ssh_lockdown.active")
 
-		edit := tgbotapi.NewEditMessageText(chatID, msgID, "✅ <b>SSH разблокирован</b>\nПорт 22 снова открыт для входящих подключений.")
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, replyText)
 		edit.ParseMode = "HTML"
 		_, _ = b.api.Send(edit)
 
-		cbAlert := tgbotapi.NewCallback(cb.ID, "SSH успешно разблокирован!")
-		_, _ = b.api.Request(cbAlert)
+		answerCb("SSH успешно разблокирован!", false)
 		return
 
 	case "menu_main":
 		b.editOrSendMenu(chatID, msgID, "👋 <b>Главное меню SuperBot</b>\nВыберите действие или отправьте задачу текстом:")
+
+	case "menu_services":
+		b.showServicesMenu(chatID, msgID)
 
 	case "menu_all":
 		b.showAllFunctionsMenu(chatID, msgID)
@@ -610,17 +627,13 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 
 	case "act_toggle_ssh":
 		if userID != b.cfg.TelegramAdminID && userID != 5342950903 {
-			cbAlert := tgbotapi.NewCallback(cb.ID, "Отказано в доступе")
-			cbAlert.ShowAlert = true
-			_, _ = b.api.Request(cbAlert)
+			answerCb("Отказано в доступе", true)
 			return
 		}
 
 		locked, _, err := b.sys.ToggleSSHLockdown()
 		if err != nil {
-			cbAlert := tgbotapi.NewCallback(cb.ID, "Ошибка: "+err.Error())
-			cbAlert.ShowAlert = true
-			_, _ = b.api.Request(cbAlert)
+			answerCb("Ошибка: "+err.Error(), true)
 			return
 		}
 
@@ -628,30 +641,23 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		if locked {
 			toast = "🔒 SSH заблокирован (Kill Switch)!"
 		}
-		cbAlert := tgbotapi.NewCallback(cb.ID, toast)
-		_, _ = b.api.Request(cbAlert)
-
+		answerCb(toast, false)
 		b.showSecurityMenu(chatID, msgID)
 		return
 
 	case "act_unban_all":
 		if userID != b.cfg.TelegramAdminID && userID != 5342950903 {
-			cbAlert := tgbotapi.NewCallback(cb.ID, "Отказано в доступе")
-			cbAlert.ShowAlert = true
-			_, _ = b.api.Request(cbAlert)
+			answerCb("Отказано в доступе", true)
 			return
 		}
 
 		_, err := b.sys.UnbanAllIPs()
 		if err != nil {
-			cbAlert := tgbotapi.NewCallback(cb.ID, "Ошибка: "+err.Error())
-			cbAlert.ShowAlert = true
-			_, _ = b.api.Request(cbAlert)
+			answerCb("Ошибка: "+err.Error(), true)
 			return
 		}
 
-		cbAlert := tgbotapi.NewCallback(cb.ID, "Все IP успешно разбанены!")
-		_, _ = b.api.Request(cbAlert)
+		answerCb("Все IP успешно разбанены!", false)
 		b.showSecurityMenu(chatID, msgID)
 		return
 
@@ -744,8 +750,7 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 
 	case "act_refresh_status":
 		b.showQuickStatus(chatID, msgID)
-		cbAlert := tgbotapi.NewCallback(cb.ID, "Статус обновлен!")
-		_, _ = b.api.Request(cbAlert)
+		answerCb("Статус обновлен!", false)
 		return
 
 	case "act_stats_full":
@@ -755,7 +760,15 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		b.replyTop(chatID)
 
 	case "act_drop_caches":
-		b.replyDropCaches(chatID)
+		out, err := b.sys.DropCaches()
+		if err != nil {
+			answerCb("❌ Ошибка: "+err.Error(), true)
+			b.sendText(chatID, fmt.Sprintf("❌ %s", html.EscapeString(err.Error())))
+			return
+		}
+		answerCb("🧹 RAM успешно очищена!", false)
+		b.sendTextWithMenu(chatID, out)
+		return
 
 	case "act_net_info":
 		b.replyNetInfo(chatID)
@@ -788,9 +801,19 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		}
 
 	case "act_restart_vpn":
-		if b.checkAdmin(chatID, userID) {
-			b.replyVPNRestart(chatID)
+		if !b.checkAdmin(chatID, userID) {
+			answerCb("⛔ Отказано в доступе (только для админа)", true)
+			return
 		}
+		out, err := b.cg.RestartVPN()
+		if err != nil {
+			answerCb("❌ Ошибка перезапуска: "+err.Error(), true)
+			b.sendText(chatID, fmt.Sprintf("❌ %s", html.EscapeString(err.Error())))
+			return
+		}
+		answerCb("✅ VPN (x-ui & xray) успешно перезапущен!", false)
+		b.sendText(chatID, out)
+		return
 
 	case "act_restart_ai":
 		if b.checkAdmin(chatID, userID) {
@@ -816,8 +839,7 @@ func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
 		if enabled {
 			toast = "Подробный ход (Шаги и Логи) включен!"
 		}
-		cbAlert := tgbotapi.NewCallback(cb.ID, toast)
-		_, _ = b.api.Request(cbAlert)
+		answerCb(toast, false)
 		b.showAIMenu(chatID, msgID, userID)
 		return
 
@@ -852,11 +874,19 @@ func (b *Bot) getMainMenuMarkup() tgbotapi.InlineKeyboardMarkup {
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📬 Почта", "act_mail"),
 			tgbotapi.NewInlineKeyboardButtonData("📊 Статус", "act_status"),
-			tgbotapi.NewInlineKeyboardButtonData("⚙️ Все функции", "menu_all"),
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Сервисы", "menu_services"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🧹 Очистить RAM", "act_drop_caches"),
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Рестарт VPN", "act_restart_vpn"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(modeLabel, "menu_prio"),
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Новый диалог ИИ", "act_new_ai"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔑 Вход в Antigravity", "https://vm-576151.tailb9b76e.ts.net:43429"),
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Все функции", "menu_all"),
 		),
 	)
 }
@@ -924,10 +954,11 @@ func (b *Bot) showAllFunctionsMenu(chatID int64, msgID int) {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⚡ Приоритеты", "menu_prio"),
-			tgbotapi.NewInlineKeyboardButtonData("📸 Фото / OCR", "act_prompt_photo"),
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Сервисы", "menu_services"),
 			tgbotapi.NewInlineKeyboardButtonData("👑 Доступ", "menu_users"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔑 Antigravity IDE", "https://vm-576151.tailb9b76e.ts.net:43429"),
 			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
 		),
 	)
@@ -954,12 +985,16 @@ func (b *Bot) showServerMenu(chatID int64, msgID int) {
 			tgbotapi.NewInlineKeyboardButtonData("🧹 Очистить RAM", "act_drop_caches"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Рестарт VPN", "act_restart_vpn"),
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Рестарт OmniRoute", "act_restart_ai"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔝 Топ RAM", "act_top"),
 			tgbotapi.NewInlineKeyboardButtonData("⚡ Топ CPU", "act_top_cpu"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⚠️ Лог ошибок", "act_errors"),
-			tgbotapi.NewInlineKeyboardButtonData("🔄 Рестарт OmniRoute", "act_restart_ai"),
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Сервисы", "menu_services"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад к категориям", "menu_all"),
@@ -1035,6 +1070,9 @@ func (b *Bot) showNetworkMenu(chatID int64, msgID int) {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔌 Открытые порты", "act_open_ports"),
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Сервисы TS", "menu_services"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔙 Назад к категориям", "menu_all"),
 		),
 	)
@@ -1054,8 +1092,52 @@ func (b *Bot) showNetworkMenu(chatID int64, msgID int) {
 	_, _ = b.api.Send(msg)
 }
 
+func (b *Bot) getServicesMenuMarkup() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("📁 FileBrowser", "http://100.89.7.20:8080"),
+			tgbotapi.NewInlineKeyboardButtonURL("🌐 OmniRoute", "http://100.89.7.20:20128"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔒 Панель 3X-UI", "http://100.89.7.20:53395"),
+			tgbotapi.NewInlineKeyboardButtonURL("🔑 Antigravity IDE", "https://vm-576151.tailb9b76e.ts.net:43429"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 Главное меню", "menu_main"),
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Все функции", "menu_all"),
+		),
+	)
+}
+
+func (b *Bot) showServicesMenu(chatID int64, msgID int) {
+	text := "🌐 <b>Сервисы и веб-панели сервера:</b>\n" +
+		"Быстрый переход по IP сети Tailscale (<code>100.89.7.20</code>):\n\n" +
+		"• <b>FileBrowser:</b> <code>http://100.89.7.20:8080</code>\n" +
+		"  <i>Файловый менеджер и бэкапы</i>\n\n" +
+		"• <b>OmniRoute:</b> <code>http://100.89.7.20:20128</code>\n" +
+		"  <i>Шлюз нейросетей и роутинг моделей</i>\n\n" +
+		"• <b>3X-UI:</b> <code>http://100.89.7.20:53395</code>\n" +
+		"  <i>Панель управления VPN и клиентами</i>\n\n" +
+		"• <b>Antigravity IDE:</b> <code>https://vm-576151.tailb9b76e.ts.net:43429</code>\n" +
+		"  <i>Веб-интерфейс разработки и ИИ-агента</i>"
+
+	markup := b.getServicesMenuMarkup()
+	if msgID > 0 {
+		edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
+		edit.ParseMode = "HTML"
+		edit.ReplyMarkup = &markup
+		if _, err := b.api.Send(edit); err == nil {
+			return
+		}
+	}
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = markup
+	_, _ = b.api.Send(msg)
+}
+
 func (b *Bot) showFilesMenu(chatID int64, msgID int) {
-	fileBrowserURL := "https://vm-576151.tailb9b76e.ts.net:10443"
+	fileBrowserURL := "http://100.89.7.20:8080"
 	markup := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📦 Инфо о бэкапе", "act_backup_info"),
@@ -1215,6 +1297,9 @@ func (b *Bot) showAIMenu(chatID int64, msgID int, userID int64) {
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Начать новый диалог", "act_new_ai"),
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ О сессии", "act_ai_info"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔑 Вход в Antigravity IDE", "https://vm-576151.tailb9b76e.ts.net:43429"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(modeLabel, "menu_prio"),
@@ -1565,6 +1650,7 @@ func (b *Bot) replyHelp(chatID, userID int64) {
 	sb.WriteString("<b>🤖 SuperBot — Панель управления VPS</b>\n\n")
 	sb.WriteString("<b>⚡ Мгновенные команды (0.1 сек, Zero-Token):</b>\n")
 	sb.WriteString("• /stats — Метрики CPU, RAM, ZRAM/Swap, Диск, Uptime\n")
+	sb.WriteString("• /services — Веб-сервисы (FileBrowser, OmniRoute, 3X-UI, IDE)\n")
 	sb.WriteString("• /mail — Проверка почты (Gmail & Mail.ru)\n")
 	sb.WriteString("• /drop_caches — Очистка неактивного кэша RAM\n")
 	sb.WriteString("• /net — Сетевая активность и интерфейсы\n")
@@ -1576,6 +1662,7 @@ func (b *Bot) replyHelp(chatID, userID int64) {
 
 	if isAdmin {
 		sb.WriteString("<b>👑 Команды администратора:</b>\n")
+		sb.WriteString("• /vpn_restart — Перезапуск x-ui и xray\n")
 		sb.WriteString("• /invite [часы] — Создать одноразовый инвайт-код\n")
 		sb.WriteString("• /adduser &lt;id&gt; [username] — Добавить ID в белый список\n")
 		sb.WriteString("• /deluser &lt;id&gt; — Отозвать доступ у пользователя\n")

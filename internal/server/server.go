@@ -16,7 +16,8 @@ import (
 // InlineButton represents an inline keyboard button.
 type InlineButton struct {
 	Text string `json:"text"`
-	Data string `json:"data"`
+	Data string `json:"data,omitempty"`
+	URL  string `json:"url,omitempty"`
 }
 
 // SendRequest is the payload sent by Antigravity or local scripts to deliver messages to TG.
@@ -135,7 +136,11 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			for _, r := range req.Buttons {
 				var row []tgbotapi.InlineKeyboardButton
 				for _, btn := range r {
-					row = append(row, tgbotapi.NewInlineKeyboardButtonData(btn.Text, btn.Data))
+					if btn.URL != "" {
+						row = append(row, tgbotapi.NewInlineKeyboardButtonURL(btn.Text, btn.URL))
+					} else {
+						row = append(row, tgbotapi.NewInlineKeyboardButtonData(btn.Text, btn.Data))
+					}
 				}
 				rows = append(rows, row)
 			}

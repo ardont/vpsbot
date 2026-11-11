@@ -152,7 +152,7 @@ func (s *SysInfo) GetQuickStatus() (string, error) {
 	return sb.String(), nil
 }
 
-// DropCaches executes sync and drops pagecache, dentries and inodes.
+// DropCaches executes sync and drops pagecache, dentries and inodes (sync; echo 3 > /proc/sys/vm/drop_caches).
 func (s *SysInfo) DropCaches() (string, error) {
 	vMemBefore, _ := mem.VirtualMemory()
 	beforeMB := uint64(0)
@@ -160,7 +160,7 @@ func (s *SysInfo) DropCaches() (string, error) {
 		beforeMB = vMemBefore.Available / (1024 * 1024)
 	}
 
-	_ = exec.Command("sync").Run()
+	_ = exec.Command("sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches").Run()
 	_ = os.WriteFile("/proc/sys/vm/drop_caches", []byte("3\n"), 0644)
 
 	vMemAfter, _ := mem.VirtualMemory()
@@ -643,48 +643,72 @@ func (s *SysInfo) GetServiceLogs(service string, lines int) (string, error) {
 
 // IsSSHLocked checks if SSH port 22 is currently blocked in UFW.
 func (s *SysInfo) IsSSHLocked() bool {
-	if _, err := os.Stat("/tmp/ssh_lockdown.active"); err == nil {
-		return true
-	}
 	out, err := exec.Command("ufw", "status").CombinedOutput()
 	if err != nil {
+		if _, err := os.Stat("/tmp/ssh_lockdown.active"); err == nil {
+			return true
+		}
 		return false
 	}
+	hasDeny := false
+	hasAllow := false
 	lines := strings.Split(string(out), "\n")
 	for _, l := range lines {
 		trimmed := strings.TrimSpace(l)
 		if strings.HasPrefix(trimmed, "22/tcp") || strings.HasPrefix(trimmed, "22 ") {
 			if strings.Contains(trimmed, "DENY") {
-				return true
+				hasDeny = true
+			}
+			if strings.Contains(trimmed, "ALLOW") {
+				hasAllow = true
 			}
 		}
 	}
+	if hasDeny {
+		return true
+	}
+	if hasAllow {
+		_ = os.Remove("/tmp/ssh_lockdown.active")
+		return false
+	}
+	if _, err := os.Stat("/tmp/ssh_lockdown.active"); err == nil {
+		return true
+	}
 	return false
+}
+
+// UnlockSSH explicitly unblocks port 22 in UFW and removes lockdown flag.
+func (s *SysInfo) UnlockSSH() (string, error) {
+	_ = exec.Command("ufw", "delete", "deny", "22/tcp").Run()
+	_ = exec.Command("ufw", "delete", "deny", "22").Run()
+	cmd := exec.Command("ufw", "allow", "22/tcp")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ошибка разблокировки: %s (%w)", string(out), err)
+	}
+	_ = os.Remove("/tmp/ssh_lockdown.active")
+	return "✅ <b>Порт SSH (22) разблокирован!</b>\nВходящие подключения снова разрешены для всех.", nil
+}
+
+// LockSSH explicitly blocks port 22 in UFW and sets lockdown flag.
+func (s *SysInfo) LockSSH() (string, error) {
+	_ = exec.Command("ufw", "delete", "allow", "22/tcp").Run()
+	_ = exec.Command("ufw", "delete", "allow", "22").Run()
+	cmd := exec.Command("ufw", "deny", "22/tcp")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ошибка блокировки: %s (%w)", string(out), err)
+	}
+	_ = os.WriteFile("/tmp/ssh_lockdown.active", []byte(time.Now().Format(time.RFC3339)), 0644)
+	return "🔒 <b>Порт SSH (22) заблокирован (Kill Switch активен)!</b>\nВнешний доступ по SSH закрыт. Соединение через Tailscale остаётся активным.", nil
 }
 
 // ToggleSSHLockdown switches SSH port 22 between locked (deny) and unlocked (allow).
 func (s *SysInfo) ToggleSSHLockdown() (bool, string, error) {
 	if s.IsSSHLocked() {
-		// Unlock
-		_ = exec.Command("ufw", "delete", "deny", "22/tcp").Run()
-		_ = exec.Command("ufw", "delete", "deny", "22").Run()
-		cmd := exec.Command("ufw", "allow", "22/tcp")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return true, "", fmt.Errorf("ошибка разблокировки: %s (%w)", string(out), err)
-		}
-		_ = os.Remove("/tmp/ssh_lockdown.active")
-		return false, "✅ <b>Порт SSH (22) разблокирован!</b>\nВходящие подключения снова разрешены для всех.", nil
+		msg, err := s.UnlockSSH()
+		return false, msg, err
 	}
-
-	// Lock
-	_ = exec.Command("ufw", "delete", "allow", "22/tcp").Run()
-	_ = exec.Command("ufw", "delete", "allow", "22").Run()
-	cmd := exec.Command("ufw", "deny", "22/tcp")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return false, "", fmt.Errorf("ошибка блокировки: %s (%w)", string(out), err)
-	}
-	_ = os.WriteFile("/tmp/ssh_lockdown.active", []byte(time.Now().Format(time.RFC3339)), 0644)
-	return true, "🔒 <b>Порт SSH (22) заблокирован (Kill Switch активен)!</b>\nВнешний доступ по SSH закрыт. Соединение через Tailscale остаётся активным.", nil
+	msg, err := s.LockSSH()
+	return true, msg, err
 }
 
 // GetSecuritySummary returns full security overview: SSH status, Fail2ban, UFW.

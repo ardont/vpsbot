@@ -106,8 +106,8 @@ func main() {
 	server := &http.Server{
 		Addr:         "127.0.0.1:" + port,
 		Handler:      mux,
-		ReadTimeout:  300 * time.Second,
-		WriteTimeout: 300 * time.Second,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 0, // 0 allows long-running streaming NDJSON without premature EOF
 	}
 
 	stop := make(chan os.Signal, 1)
@@ -231,7 +231,7 @@ var (
 func discoverHub() (string, string) {
 	out, err := exec.Command("ps", "-eo", "pid,command").Output()
 	if err != nil {
-		return "127.0.0.1:43427", "05bf9066-0574-41fe-8c51-c6136c97b348"
+		return "", ""
 	}
 
 	var port, token string
@@ -256,11 +256,8 @@ func discoverHub() (string, string) {
 		}
 	}
 
-	if port == "" {
-		port = "43427"
-	}
-	if token == "" {
-		token = "05bf9066-0574-41fe-8c51-c6136c97b348"
+	if port == "" || token == "" {
+		return "", ""
 	}
 
 	return "127.0.0.1:" + port, token
@@ -273,6 +270,10 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 	}
 
 	hubAddr, csrfToken := discoverHub()
+	if hubAddr == "" || csrfToken == "" {
+		return nil, fmt.Errorf("активный Antigravity Hub не обнаружен на сервере")
+	}
+
 	cleanEnv := []string{
 		"HOME=/root",
 		"PATH=/root/.gemini/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

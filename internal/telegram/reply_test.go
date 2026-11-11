@@ -121,3 +121,33 @@ func TestIncomingUpdateJSONDecoding(t *testing.T) {
 		t.Fatalf("unexpected reply_to_message: %+v", u.Message.ReplyToMessage)
 	}
 }
+
+func TestServicesMenuMarkup(t *testing.T) {
+	bot := &Bot{}
+	markup := bot.getServicesMenuMarkup()
+
+	expectedURLs := map[string]string{
+		"📁 FileBrowser":   "http://100.89.7.20:8080",
+		"🌐 OmniRoute":     "http://100.89.7.20:20128",
+		"🔒 Панель 3X-UI":  "http://100.89.7.20:53395",
+		"🔑 Antigravity IDE": "https://vm-576151.tailb9b76e.ts.net:43429",
+	}
+
+	found := make(map[string]bool)
+	for _, row := range markup.InlineKeyboard {
+		for _, btn := range row {
+			if url, ok := expectedURLs[btn.Text]; ok {
+				if btn.URL == nil || *btn.URL != url {
+					t.Errorf("button %s expected URL %s, got %v", btn.Text, url, btn.URL)
+				}
+				found[btn.Text] = true
+			}
+		}
+	}
+
+	for name := range expectedURLs {
+		if !found[name] {
+			t.Errorf("expected button %s in services markup, but not found", name)
+		}
+	}
+}

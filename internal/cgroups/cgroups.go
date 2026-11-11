@@ -116,7 +116,7 @@ func (m *Manager) SetMode(mode Mode) (string, error) {
 	), nil
 }
 
-// RestartVPN restarts the configured VPN service (e.g. x-ui.service).
+// RestartVPN restarts the configured VPN services (systemctl restart x-ui and systemctl restart xray).
 func (m *Manager) RestartVPN() (string, error) {
 	if runtime.GOOS != "linux" {
 		return "⚠️ Перезапуск сервисов доступен только на Linux сервере.", nil
@@ -128,11 +128,15 @@ func (m *Manager) RestartVPN() (string, error) {
 		return "", fmt.Errorf("ошибка перезапуска %s: %s (%w)", m.vpnService, string(out), err)
 	}
 
+	// Also restart xray service
+	cmdXray := exec.Command("systemctl", "restart", "xray")
+	_ = cmdXray.Run()
+
 	statusCmd := exec.Command("systemctl", "is-active", m.vpnService)
 	statusOut, _ := statusCmd.Output()
 	statusStr := strings.TrimSpace(string(statusOut))
 
-	return fmt.Sprintf("🔄 Сервис <b>%s</b> перезапущен.\nСтатус: <code>%s</code>", m.vpnService, statusStr), nil
+	return fmt.Sprintf("🔄 Сервисы VPN (<b>x-ui</b> и <b>xray</b>) успешно перезапущены.\nСтатус: <code>%s</code>", statusStr), nil
 }
 
 // RestartAI restarts the AI/Gateway service (e.g. omniroute.service).
