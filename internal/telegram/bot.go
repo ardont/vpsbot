@@ -28,15 +28,16 @@ import (
 
 // Bot manages Telegram updates, user authorization, inline menus, and AI bridge.
 type Bot struct {
-	api        *tgbotapi.BotAPI
-	cfg        *config.Config
-	auth       *auth.Store
-	sys        *sysinfo.SysInfo
-	cg         *cgroups.Manager
-	aiCli      *antigravity.Client
-	sessions   map[int64]string
-	sessMu     sync.RWMutex
-	lastKbSent sync.Map // map[int64]time.Time — throttle persistent keyboard resend
+	api          *tgbotapi.BotAPI
+	cfg          *config.Config
+	auth         *auth.Store
+	sys          *sysinfo.SysInfo
+	cg           *cgroups.Manager
+	aiCli        *antigravity.Client
+	sessions     map[int64]string
+	sessionsFile string
+	sessMu       sync.RWMutex
+	lastKbSent   sync.Map // map[int64]time.Time — throttle persistent keyboard resend
 }
 
 // New creates a new Telegram bot router.
@@ -48,27 +49,68 @@ func New(
 	cg *cgroups.Manager,
 	aiCli *antigravity.Client,
 ) *Bot {
-	return &Bot{
-		api:      api,
-		cfg:      cfg,
-		auth:     authStore,
-		sys:      sys,
-		cg:       cg,
-		aiCli:    aiCli,
-		sessions: make(map[int64]string),
+	b := &Bot{
+		api:          api,
+		cfg:          cfg,
+		auth:         authStore,
+		sys:          sys,
+		cg:           cg,
+		aiCli:        aiCli,
+		sessions:     make(map[int64]string),
+		sessionsFile: "/opt/superbot/sessions.json",
 	}
+	b.loadSessions()
+	return b
+}
+
+func (b *Bot) loadSessions() {
+	if b.sessionsFile == "" {
+		return
+	}
+	data, err := os.ReadFile(b.sessionsFile)
+	if err != nil {
+		return
+	}
+	var sess map[int64]string
+	if err := json.Unmarshal(data, &sess); err == nil && sess != nil {
+		b.sessMu.Lock()
+		b.sessions = sess
+		b.sessMu.Unlock()
+	}
+}
+
+func (b *Bot) saveSessions() {
+	if b.sessionsFile == "" {
+		return
+	}
+	data, err := json.MarshalIndent(b.sessions, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(b.sessionsFile, data, 0600)
 }
 
 func (b *Bot) getSession(userID int64) string {
 	b.sessMu.RLock()
 	defer b.sessMu.RUnlock()
+	if b.sessions == nil {
+		return ""
+	}
 	return b.sessions[userID]
 }
 
 func (b *Bot) setSession(userID int64, convID string) {
 	b.sessMu.Lock()
 	defer b.sessMu.Unlock()
-	b.sessions[userID] = convID
+	if b.sessions == nil {
+		b.sessions = make(map[int64]string)
+	}
+	if convID == "" {
+		delete(b.sessions, userID)
+	} else {
+		b.sessions[userID] = convID
+	}
+	b.saveSessions()
 }
 
 // StartPolling starts listening for Telegram updates in a loop with native quote & reply decoding.
@@ -1708,7 +1750,7 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string, replyToMsgID in
 		waitMsgID = waitMsg.MessageID
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2400*time.Second)
 	defer cancel()
 
 	// Keep typing indicator active while Antigravity thinks and executes tool calls
@@ -1816,9 +1858,8 @@ func (b *Bot) handleAIQuery(chatID, userID int64, prompt string, replyToMsgID in
 	activeConvID := b.getSession(userID)
 	resp, err := b.aiCli.AskStream(ctx, prompt, activeConvID, false, onProgress)
 	if err != nil {
-		// Reset active session so future queries start clean and don't loop on broken sessions
-		b.setSession(userID, "")
-		errMsg := fmt.Sprintf("⚠️ <b>Antigravity Bridge:</b>\n%s\n\n<i>Сессия автоматически сброшена. Следующее сообщение начнет чистый диалог.</i>", html.EscapeString(err.Error()))
+		// Do not reset session automatically so user does not lose their context
+		errMsg := fmt.Sprintf("⚠️ <b>Antigravity Bridge:</b>\n%s\n\n<i>Контекст диалога сохранен. Для сброса используйте /reset или кнопку «🔄 Новый диалог».</i>", html.EscapeString(err.Error()))
 		if waitMsgID > 0 {
 			edit := tgbotapi.NewEditMessageText(chatID, waitMsgID, errMsg)
 			edit.ParseMode = "HTML"

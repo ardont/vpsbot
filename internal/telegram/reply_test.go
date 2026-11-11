@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -149,5 +150,52 @@ func TestServicesMenuMarkup(t *testing.T) {
 		if !found[name] {
 			t.Errorf("expected button %s in services markup, but not found", name)
 		}
+	}
+}
+
+func TestBotSessionsPersistence(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "sessions.json")
+	bot1 := &Bot{
+		sessions:     make(map[int64]string),
+		sessionsFile: tmpFile,
+	}
+
+	bot1.setSession(12345, "conv-abc-1")
+	bot1.setSession(67890, "conv-xyz-2")
+
+	if bot1.getSession(12345) != "conv-abc-1" {
+		t.Fatalf("expected conv-abc-1, got %s", bot1.getSession(12345))
+	}
+
+	// Create second bot instance simulating service restart
+	bot2 := &Bot{
+		sessions:     make(map[int64]string),
+		sessionsFile: tmpFile,
+	}
+	bot2.loadSessions()
+
+	if bot2.getSession(12345) != "conv-abc-1" {
+		t.Errorf("expected session to persist across restarts for 12345, got %s", bot2.getSession(12345))
+	}
+	if bot2.getSession(67890) != "conv-xyz-2" {
+		t.Errorf("expected session to persist across restarts for 67890, got %s", bot2.getSession(67890))
+	}
+
+	// Test deletion / reset
+	bot2.setSession(12345, "")
+	if bot2.getSession(12345) != "" {
+		t.Errorf("expected session to be cleared after reset")
+	}
+
+	bot3 := &Bot{
+		sessions:     make(map[int64]string),
+		sessionsFile: tmpFile,
+	}
+	bot3.loadSessions()
+	if bot3.getSession(12345) != "" {
+		t.Errorf("expected session to stay cleared in bot3")
+	}
+	if bot3.getSession(67890) != "conv-xyz-2" {
+		t.Errorf("expected 67890 to still be preserved")
 	}
 }

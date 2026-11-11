@@ -351,9 +351,9 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 
 	transcriptPath := filepath.Join("/root/.gemini/antigravity/brain", convID, ".system_generated/logs/transcript.jsonl")
 
-	maxTotalDuration := 1200 * time.Second
+	maxTotalDuration := 2400 * time.Second
 	deadline := time.Now().Add(maxTotalDuration)
-	inactivityTimeout := 300 * time.Second
+	inactivityTimeout := 600 * time.Second
 	lastActivity := time.Now()
 	var lastFileSize int64 = initialOffset
 	reportedEvents := make(map[string]bool)
@@ -368,7 +368,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 		case <-ticker.C:
 			now := time.Now()
 			if now.After(deadline) {
-				return nil, fmt.Errorf("общий таймаут выполнения запроса (20 мин) превышен в %s", convID)
+				return nil, fmt.Errorf("общий таймаут выполнения запроса (40 мин) превышен в %s", convID)
 			}
 
 			stat, err := os.Stat(transcriptPath)
@@ -384,7 +384,7 @@ func queryAntigravity(ctx context.Context, prompt string, targetConvID string, r
 				lastFileSize = stat.Size()
 				lastActivity = now
 			} else if now.Sub(lastActivity) > inactivityTimeout {
-				return nil, fmt.Errorf("antigravity не отвечает более 300с в %s", convID)
+				return nil, fmt.Errorf("antigravity не отвечает более 600с в %s", convID)
 			}
 
 			events, reply, question, options, done, err := readTurnResponse(transcriptPath, initialOffset)
