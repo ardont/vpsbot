@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# setup_google_mcp.sh — Настройка google-mcp (Go)
-# Gmail & Google Calendar MCP Server для Antigravity
+# Автоматическая загрузка и настройка Google Workspace MCP (Go)
 # ==============================================================================
 
 set -euo pipefail

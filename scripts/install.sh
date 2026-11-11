@@ -34,17 +34,23 @@ if [[ ! -f /opt/superbot/.env ]]; then
     fi
 fi
 
-echo "==> [4/6] Установка бинарника superbot..."
+echo "==> [4/6] Установка бинарников superbot и mcp-telegram..."
 if [[ -f "$PROJECT_ROOT/bin/superbot" ]]; then
     install -m 755 "$PROJECT_ROOT/bin/superbot" /usr/local/bin/superbot
-elif [[ -f "$PROJECT_ROOT/superbot" ]]; then
-    install -m 755 "$PROJECT_ROOT/superbot" /usr/local/bin/superbot
 elif command -v go >/dev/null 2>&1; then
-    echo "Компиляция бинарника на сервере..."
+    echo "Компиляция superbot на сервере..."
     (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -ldflags="-s -w" -o /usr/local/bin/superbot ./cmd/bot)
-else
-    echo "⚠️ Бинарник superbot не найден и Go не установлен."
-    echo "Пожалуйста, соберите бинарник командой 'make build-linux' на машине разработчика и загрузите в /usr/local/bin/superbot"
+fi
+
+if [[ -f "$PROJECT_ROOT/bin/mcp-telegram" ]]; then
+    install -m 755 "$PROJECT_ROOT/bin/mcp-telegram" /usr/local/bin/mcp-telegram-bridge
+elif command -v go >/dev/null 2>&1; then
+    (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -ldflags="-s -w" -o /usr/local/bin/mcp-telegram-bridge ./cmd/mcp-telegram)
+fi
+
+# Установка Google MCP
+if [[ -f "$SCRIPT_DIR/setup_google_mcp.sh" ]]; then
+    bash "$SCRIPT_DIR/setup_google_mcp.sh" || true
 fi
 
 echo "==> [5/6] Установка и регистрация systemd-сервиса..."
